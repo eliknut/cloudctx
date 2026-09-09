@@ -70,3 +70,25 @@ exclusivity, `show` line format, `CLOUDCTX_STORE` in `_env`/`exec`/`clear`,
 the exact `CLEARABLE_VARS` list, the error phrase for `exec`/`show`, the
 empty-registry sentence of `list`, and `delete` sweeping a companion
 directory under the store (kept with `--keep-store`).
+
+## 5. Addendum: pimctl 0.2.0 audit (2026-09-09)
+
+pimctl went public the same day (github.com/larsakerlund/pimctl, v0.2.0) and
+now requires cloudctx >= 1.4.0. Reading its `internal/azauth/cloudctx.go`
+against this contract found three gaps, closed in the doc and tests:
+
+- **`--version` joins the contract.** pimctl gates on `cloudctx --version`,
+  parsing `cloudctx X.Y.Z` from stdout (cached per binary for a day). The
+  contract had no word on it, so a format change would have broken the gate
+  silently. Pinned as one stdout line, `cloudctx <semver>`, exit 0.
+- **The human `list` sentence leaves the contract.** It was pinned "until no
+  companion needs it"; pimctl 0.2.0 reads `--names` only and never parses the
+  human listing. The test and the promise are removed.
+- **`store:` is named as contract, not just described.** The doc told
+  companions to parse `key = value` lines only, while pimctl (and our own
+  test) read the `store:` path line. The doc now says both are the contract
+  and the other path lines are not.
+
+Verified unchanged from pimctl's side: `exec`, `list --names`, the seven
+managed variables (its `cloudctxVars` mirrors `CLEARABLE_VARS` exactly), and
+the "unknown context" stderr phrase, which it matches case-insensitively.

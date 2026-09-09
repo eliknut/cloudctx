@@ -21,8 +21,9 @@ Per-window Azure/AWS CLI context isolation: zero-dependency Python 3.9+ CLI
 - Spec-first workflow: designs in `docs/superpowers/specs/`, plans in
   `docs/superpowers/plans/`.
 - `docs/companions.md` + `tests/test_companion_contract.py` pin the surfaces
-  external tools (pimctl) depend on: `exec`, `list --names`, `show` line format,
-  exported vars/`CLEARABLE_VARS`, the "unknown context" phrase. Changing any of
-  them means updating the doc, the tests, and telling the companions.
+  external tools (pimctl) depend on: `exec`, `list --names`, `show` line format
+  (`key = value` lines + `store:`), `--version` (`cloudctx X.Y.Z`), exported
+  vars/`CLEARABLE_VARS`, the "unknown context" phrase. Changing any of them
+  means updating the doc, the tests, and telling the companions.
 - Headless Chrome enforces ~500px min window width — for phone-width screenshots,
   render the page inside a 390px iframe harness.

@@ -96,7 +96,8 @@ ambiguous, confirm WHICH before acting — never guess on a destructive op.
 
 ## PIM role activation
 
-If `pimctl` is installed (`command -v pimctl`), use it to activate Entra PIM
+If [`pimctl`](https://github.com/larsakerlund/pimctl) is installed
+(`command -v pimctl`), use it to activate Entra PIM
 eligibility for Azure resource roles instead of hand-rolled `az rest` calls
 against `roleAssignmentScheduleRequests`. It runs every Azure call through
 `cloudctx exec` itself, so name the context explicitly:
