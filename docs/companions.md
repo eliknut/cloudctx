@@ -1,11 +1,12 @@
 # Companion contract
 
 cloudctx is one tool in a chain: other tools drive it from the outside to get
-per-customer credential isolation without reimplementing it. pimctl (batch
-activation of Azure PIM roles) is the first. This page lists the surfaces a
-companion may rely on, with their exact shape. Each one is pinned by
-`tests/test_companion_contract.py`, so changing one is deliberate: it fails the
-suite, and ships with a minor version bump.
+per-customer credential isolation without reimplementing it.
+[pimctl](https://github.com/larsakerlund/pimctl) (batch activation of Azure
+PIM roles) is the first; pimctl 0.2.0 requires cloudctx 1.4.0 or newer. This
+page lists the surfaces a companion may rely on, with their exact shape. Each
+one is pinned by `tests/test_companion_contract.py`, so changing one is
+deliberate: it fails the suite, and ships with a minor version bump.
 
 Anything not on this page, in particular every `_`-prefixed command (`_env`,
 `_names`, `_decorate`, `_refresh-update-check`), is internal and may change
@@ -31,9 +32,9 @@ without notice.
 One registered name per line, sorted, nothing else. An empty registry prints
 nothing and exits 0. Mutually exclusive with `-v`.
 
-`cloudctx list` without flags is for people. Its empty-registry output is the
-single line `no contexts. Create one with: cloudctx new <name>`; pimctl v0.1.1
-still matches that sentence, so it stays pinned until no companion needs it.
+`cloudctx list` without flags is for people. No companion parses it since
+pimctl 0.2.0 moved to `--names`, so its output, the empty-registry sentence
+included, is not part of the contract.
 
 ## Reading a context's registry entry
 
@@ -53,8 +54,10 @@ Then a blank line and path lines, of which `store:` is the first:
     aws config:      /Users/me/.cloudctx/acme/aws/config  (missing)
     aws credentials: /Users/me/.cloudctx/acme/aws/credentials  (missing)
 
-A companion reading a field should parse the `key = value` lines only and
-ignore everything else.
+The `key = value` lines and the `store:` line are the contract; the other
+path lines are not. A companion should read those and ignore everything else,
+so a new field or path line cannot break its parse. pimctl reads
+`azure_tenant` and `store:`.
 
 ## Environment a context exports
 
@@ -91,10 +94,21 @@ An unknown context, on any command that takes one, prints exactly
 
 to stderr, prints nothing to stdout, and exits 1.
 
+## Checking the version
+
+    cloudctx --version
+
+One line, `cloudctx <major>.<minor>.<patch>`, on stdout, exit 0, nothing on
+stderr. A companion that needs a surface from a given release gates on this
+line: pimctl 0.2.0 refuses anything older than 1.4.0 with a message that
+names `cloudctx self-update`. The number is `__version__`: three numeric
+components, no suffix.
+
 ## Not part of the contract
 
-- The human-oriented output of `list` (other than the empty sentence above),
-  `status`, `login` and `new`, and the iTerm2 decoration.
+- The human-oriented output of `list` (its empty-registry sentence was pinned
+  for pimctl 0.1.1; pimctl 0.2.0 no longer reads it), `status`, `login` and
+  `new`, and the iTerm2 decoration.
 - Every `_`-prefixed command. `_names` happens to equal `list --names` today
   and the shell shim uses it; do not depend on it from outside.
 - The registry file format (`contexts.toml`). Read it through `show`.

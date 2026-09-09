@@ -66,12 +66,17 @@ class TestListNamesEmpty(Base):
         self.assertEqual(code, 0)
         self.assertEqual(out, "")
 
-    def test_human_list_sentence_is_pinned(self):
-        # pimctl matches this sentence to tell "no contexts" from a parse
-        # failure; companions should prefer --names, but the sentence is
-        # part of the contract until they all do.
-        _, out = self.run_cli("list")
-        self.assertEqual(out.strip(), "no contexts. Create one with: cloudctx new <name>")
+
+class TestVersionContract(ContractBase):
+    def test_version_is_one_stdout_line_cloudctx_semver(self):
+        # pimctl gates on this line (it refuses cloudctx < 1.4.0), reading the
+        # first dotted number after "cloudctx" and caching it per binary for a
+        # day. One line, stdout only, exit 0.
+        r = self.run_bin("--version")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stderr, "")
+        self.assertRegex(r.stdout, r"\Acloudctx \d+\.\d+\.\d+\n\Z")
+        self.assertEqual(r.stdout.split()[1], self.cc.__version__)
 
 
 class TestShowFormat(ContractBase):

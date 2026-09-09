@@ -137,7 +137,8 @@ and keep any per-context state under `$CLOUDCTX_STORE/<tool>/` so
 `cloudctx delete` sweeps it with the rest of the store. The surfaces a
 companion may rely on are listed in [docs/companions.md](docs/companions.md)
 and pinned by `tests/test_companion_contract.py`. The first companion is
-pimctl, which batch-activates Azure PIM roles per context.
+[pimctl](https://github.com/larsakerlund/pimctl), which batch-activates Azure
+PIM roles per context and requires cloudctx 1.4.0 or newer.
 
 ## Migration
 
