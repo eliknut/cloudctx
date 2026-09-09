@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 ESC = "\x1b"
 BEL = "\x07"
@@ -161,6 +161,8 @@ def cmd_delete(args) -> int:
 
 
 def cmd_list(args) -> int:
+    if getattr(args, "names", False):
+        return cmd_names(args)
     registry = load_registry()
     if not registry:
         print("no contexts. Create one with: cloudctx new <name>")
@@ -198,6 +200,7 @@ def cmd_show(args) -> int:
     for key in sorted(entry):
         print(f"{key} = {entry[key]}")
     print()
+    print(f"store:           {context_dir(name)}")
     az = azure_dir(name)
     print(f"azure store:     {az}  {'(exists)' if az.is_dir() else '(missing)'}")
     cfg, cred = aws_config(name), aws_credentials(name)
@@ -360,7 +363,7 @@ def save_registry(data: dict) -> None:
 # escaped because the registry is untrusted input to that eval.
 # --------------------------------------------------------------------------
 CLEARABLE_VARS = [
-    "CLOUDCTX_CONTEXT", "CLOUDCTX_AZURE_LABEL", "AZURE_CONFIG_DIR",
+    "CLOUDCTX_CONTEXT", "CLOUDCTX_AZURE_LABEL", "CLOUDCTX_STORE", "AZURE_CONFIG_DIR",
     "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_PROFILE",
 ]
 
@@ -375,6 +378,9 @@ def env_dict(name: str) -> dict:
     entry = load_registry()[name]
     env = {
         "CLOUDCTX_CONTEXT": name,
+        # The context's own directory, for companion tools that keep per-context
+        # state under $CLOUDCTX_STORE/<tool>/ so `cloudctx delete` sweeps it too.
+        "CLOUDCTX_STORE": str(context_dir(name).resolve()),
         # Always redirect Azure to the isolated store — even an AWS-only context
         # should never fall back to the global ~/.azure.
         "AZURE_CONFIG_DIR": str(azure_dir(name).resolve()),
@@ -985,8 +991,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     p_list = sub.add_parser("list", help="list contexts; mark the active one")
-    p_list.add_argument("-v", "--verbose", action="store_true",
-                        help="show display/azure/aws columns")
+    p_list_mode = p_list.add_mutually_exclusive_group()
+    p_list_mode.add_argument("-v", "--verbose", action="store_true",
+                             help="show display/azure/aws columns")
+    p_list_mode.add_argument("--names", action="store_true",
+                             help="bare names only, one per line (for scripts and companion tools)")
     p_list.set_defaults(func=cmd_list)
 
     p_show = sub.add_parser("show", help="show a context's registry entry + store paths")

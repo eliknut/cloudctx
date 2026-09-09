@@ -94,6 +94,24 @@ cloudctx exec <ctx> -- az group list --subscription "<name-or-id>" -o table
 If the user names an environment (prod/test/qa) or subscription and the match is
 ambiguous, confirm WHICH before acting — never guess on a destructive op.
 
+## PIM role activation
+
+If `pimctl` is installed (`command -v pimctl`), use it to activate Entra PIM
+eligibility for Azure resource roles instead of hand-rolled `az rest` calls
+against `roleAssignmentScheduleRequests`. It runs every Azure call through
+`cloudctx exec` itself, so name the context explicitly:
+
+```sh
+pimctl -c <ctx> ls                                                  # eligible roles
+pimctl -c <ctx> up --role "<role>" --scope <scope> --for 1h -j "<reason>" -y
+pimctl -c <ctx> status                                              # what is held now
+pimctl -c <ctx> down --role "<role>" --scope <scope> -y             # give it back
+```
+
+`-j` is required when there is no terminal. Exit code 2 means the request is
+waiting for an approver, so the role is NOT active yet. Deactivate with `down`
+when the task is done.
+
 ## Never
 
 - ❌ bare `az ...` — hits the global store (see above).

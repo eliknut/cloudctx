@@ -28,6 +28,7 @@ exports a fixed set of environment variables into the current shell:
 | Variable | Points at |
 |---|---|
 | `AZURE_CONFIG_DIR` | `~/.cloudctx/<name>/azure/` (token cache + active subscription) |
+| `CLOUDCTX_STORE` | `~/.cloudctx/<name>/` itself, for companion tools that keep per-context state (see [Companions](#companions)) |
 | `AWS_CONFIG_FILE` | `~/.cloudctx/<name>/aws/config` *(when the context defines AWS fields)* |
 | `AWS_SHARED_CREDENTIALS_FILE` | `~/.cloudctx/<name>/aws/credentials` *(ditto)* |
 | `AWS_PROFILE` | the context's profile name *(ditto)* |
@@ -72,6 +73,7 @@ cloudctx new acme --display "Acme AB" --color "#c0392b" \
 cloudctx use acme          # export env into THIS shell + set iTerm2 badge/title/tab color
 cloudctx list              # list contexts; * marks the one active in this shell
 cloudctx list -v           # ...with display/azure/aws columns
+cloudctx list --names      # bare names, one per line (scripts, companion tools)
 cloudctx show acme         # full registry entry + store paths
 cloudctx status            # the REAL identity here: az account show + aws sts
 cloudctx login acme        # re-authenticate; verifies the landed tenant matches
@@ -125,6 +127,17 @@ Install it with [`skills`](https://github.com/vercel-labs/skills):
 ```sh
 npx skills add eliknut/cloudctx -g
 ```
+
+## Companions
+
+Other tools can drive cloudctx to get per-customer isolation without
+reimplementing it: run through `cloudctx exec <name> -- ...`, enumerate with
+`cloudctx list --names`, read a context's fields with `cloudctx show <name>`,
+and keep any per-context state under `$CLOUDCTX_STORE/<tool>/` so
+`cloudctx delete` sweeps it with the rest of the store. The surfaces a
+companion may rely on are listed in [docs/companions.md](docs/companions.md)
+and pinned by `tests/test_companion_contract.py`. The first companion is
+pimctl, which batch-activates Azure PIM roles per context.
 
 ## Migration
 

@@ -5,7 +5,7 @@ Per-window Azure/AWS CLI context isolation: zero-dependency Python 3.9+ CLI
 
 ## Commands
 
-- `python3 -m unittest discover -s tests -v` — full suite (unit + shell shim + site checks)
+- `python3 -m unittest discover -s tests -v` — full suite (unit + shell shim + site + companion-contract checks)
 - `sh tests/isolation_proof.sh` — two-context isolation acceptance test
 - `loft deploy site cloudctx` — deploy landing page → https://cloudctx.loft.redeploy.cloud
   (auth: `loft login https://loft.redeploy.cloud`; device flow prints a code, no browser popup)
@@ -20,5 +20,9 @@ Per-window Azure/AWS CLI context isolation: zero-dependency Python 3.9+ CLI
   302 to Entra ID; verify pages in a signed-in browser.
 - Spec-first workflow: designs in `docs/superpowers/specs/`, plans in
   `docs/superpowers/plans/`.
+- `docs/companions.md` + `tests/test_companion_contract.py` pin the surfaces
+  external tools (pimctl) depend on: `exec`, `list --names`, `show` line format,
+  exported vars/`CLEARABLE_VARS`, the "unknown context" phrase. Changing any of
+  them means updating the doc, the tests, and telling the companions.
 - Headless Chrome enforces ~500px min window width — for phone-width screenshots,
   render the page inside a 390px iframe harness.
