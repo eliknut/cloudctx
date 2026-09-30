@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 ESC = "\x1b"
 BEL = "\x07"
@@ -365,6 +365,7 @@ def save_registry(data: dict) -> None:
 CLEARABLE_VARS = [
     "CLOUDCTX_CONTEXT", "CLOUDCTX_AZURE_LABEL", "CLOUDCTX_STORE", "AZURE_CONFIG_DIR",
     "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_PROFILE",
+    "ARM_TENANT_ID", "ARM_SUBSCRIPTION_ID",
 ]
 
 
@@ -387,6 +388,14 @@ def env_dict(name: str) -> dict:
     }
     if entry.get("azure_subscription"):
         env["CLOUDCTX_AZURE_LABEL"] = entry["azure_subscription"]
+    # Terraform's azurerm provider reads ARM_*; export them only for GUID-pinned
+    # values (a domain tenant or subscription name would be rejected, and
+    # resolving it would need a network call on every exec).
+    for field, var in (("azure_tenant", "ARM_TENANT_ID"),
+                       ("azure_subscription", "ARM_SUBSCRIPTION_ID")):
+        value = entry.get(field)
+        if isinstance(value, str) and GUID_RE.match(value):
+            env[var] = value
     # AWS vars only when the context actually defines AWS fields (v1 = opt-in).
     if any(entry.get(f) for f in AWS_FIELDS):
         env["AWS_CONFIG_FILE"] = str(aws_config(name).resolve())
@@ -520,7 +529,7 @@ def azure_login_cmds(entry, device_code=False):
     return cmds
 
 
-GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\Z")
 
 
 def _verify_azure_login(name, entry, env) -> None:
