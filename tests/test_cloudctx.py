@@ -245,6 +245,51 @@ class TestEnv(Base):
             self.assertIn(f"unset {var}", out)
 
 
+class TestArmEnv(Base):
+    TENANT = "11111111-2222-3333-4444-555555555555"
+    SUB = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    def test_guid_tenant_exports_arm_tenant_id(self):
+        self.run_cli("new", "acme", "--azure-tenant", self.TENANT, "--no-login")
+        _, out = self.run_cli("_env", "acme")
+        self.assertIn(f"export ARM_TENANT_ID='{self.TENANT}'", out)
+
+    def test_domain_tenant_does_not_export_arm_tenant_id(self):
+        self.run_cli("new", "acme", "--azure-tenant", "contoso.onmicrosoft.com", "--no-login")
+        _, out = self.run_cli("_env", "acme")
+        self.assertNotIn("export ARM_TENANT_ID", out)
+        self.assertIn("unset ARM_TENANT_ID", out)
+
+    def test_guid_subscription_exports_arm_subscription_id(self):
+        self.run_cli("new", "acme", "--azure-subscription", self.SUB, "--no-login")
+        _, out = self.run_cli("_env", "acme")
+        self.assertIn(f"export ARM_SUBSCRIPTION_ID='{self.SUB}'", out)
+
+    def test_named_subscription_does_not_export_arm_subscription_id(self):
+        self.run_cli("new", "acme", "--azure-subscription", "Prod", "--no-login")
+        _, out = self.run_cli("_env", "acme")
+        self.assertNotIn("export ARM_SUBSCRIPTION_ID", out)
+        self.assertIn("unset ARM_SUBSCRIPTION_ID", out)
+
+    def test_exec_strips_inherited_arm_subscription_id(self):
+        # The cross-customer leak case: an ARM_SUBSCRIPTION_ID left over from
+        # another context's window must not reach a context that pins none.
+        self.run_cli("new", "acme", "--azure-tenant", self.TENANT, "--no-login")
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        env["ARM_SUBSCRIPTION_ID"] = "stale-other-customer"
+        r = subprocess.run([CLI, "exec", "acme", "--", "sh", "-c",
+                            'printf "S=%s T=%s" "$ARM_SUBSCRIPTION_ID" "$ARM_TENANT_ID"'],
+                           env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertEqual(r.stdout, f"S= T={self.TENANT}")
+
+    def test_clear_unsets_arm_vars(self):
+        _, out = self.run_cli("_env", "--clear")
+        self.assertIn("unset ARM_TENANT_ID", out)
+        self.assertIn("unset ARM_SUBSCRIPTION_ID", out)
+
+
 class TestDecorate(Base):
     def setUp(self):
         super().setUp()

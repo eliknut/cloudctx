@@ -32,6 +32,8 @@ exports a fixed set of environment variables into the current shell:
 | `AWS_CONFIG_FILE` | `~/.cloudctx/<name>/aws/config` *(when the context defines AWS fields)* |
 | `AWS_SHARED_CREDENTIALS_FILE` | `~/.cloudctx/<name>/aws/credentials` *(ditto)* |
 | `AWS_PROFILE` | the context's profile name *(ditto)* |
+| `ARM_TENANT_ID` | the pinned `azure_tenant`, for Terraform *(only when it is a GUID)* |
+| `ARM_SUBSCRIPTION_ID` | the pinned `azure_subscription`, for Terraform *(only when it is a GUID)* |
 
 Because selection is purely env-var driven and the active Azure subscription lives
 *inside* `AZURE_CONFIG_DIR`, two windows with different exports cannot interfere.

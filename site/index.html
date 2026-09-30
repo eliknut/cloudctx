@@ -75,6 +75,8 @@
         <tr><td>AWS_CONFIG_FILE</td><td><code>~/.cloudctx/&lt;name&gt;/aws/config</code> <em>(when the context defines AWS fields)</em></td></tr>
         <tr><td>AWS_SHARED_CREDENTIALS_FILE</td><td><code>~/.cloudctx/&lt;name&gt;/aws/credentials</code> <em>(ditto)</em></td></tr>
         <tr><td>AWS_PROFILE</td><td>the context's profile name <em>(ditto)</em></td></tr>
+        <tr><td>ARM_TENANT_ID</td><td>the pinned <code>azure_tenant</code>, for Terraform <em>(only when it is a GUID)</em></td></tr>
+        <tr><td>ARM_SUBSCRIPTION_ID</td><td>the pinned <code>azure_subscription</code>, for Terraform <em>(only when it is a GUID)</em></td></tr>
       </table>
       </div>
       <p class="prose">A tiny sourced shell function (also named <code>cloudctx</code>,

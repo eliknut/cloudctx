@@ -70,10 +70,15 @@ so a new field or path line cannot break its parse. pimctl reads
 | `AWS_CONFIG_FILE` | `$CLOUDCTX_STORE/aws/config` | when the context defines AWS fields |
 | `AWS_SHARED_CREDENTIALS_FILE` | `$CLOUDCTX_STORE/aws/credentials` | ditto |
 | `AWS_PROFILE` | the context's profile name | ditto |
+| `ARM_TENANT_ID` | the pinned `azure_tenant`, for Terraform | when `azure_tenant` is a GUID |
+| `ARM_SUBSCRIPTION_ID` | the pinned `azure_subscription`, for Terraform | when `azure_subscription` is a GUID |
 
-These seven are the **managed variables**. `cloudctx clear` unsets all of
+A domain-form tenant or a subscription given by name exports no `ARM_*`
+variable: Terraform rejects non-GUID values.
+
+These nine are the **managed variables**. `cloudctx clear` unsets all of
 them, and `exec` strips them from the caller before overlaying. A companion
-that spawns its own "no context" child should strip the same seven.
+that spawns its own "no context" child should strip the same nine.
 
 `$CLOUDCTX_CONTEXT` set in a shell means `cloudctx use` selected that context
 there; a companion may treat it as the ambient selection.
