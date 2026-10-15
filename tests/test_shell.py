@@ -11,6 +11,9 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+import re
+
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 ROOT = Path(__file__).resolve().parent.parent
 MARK = "CCTX="
@@ -189,6 +192,40 @@ class TestShimZsh(unittest.TestCase):
         # Finding #15: leading VAR=val assignments should be skipped.
         r = self.run_script('_cloudctx_guard "FOO=bar aws s3 ls"')
         self.assertIn("no context", r.stderr.lower(), msg=r.stderr)
+
+    def _render_zsh_prompt(self, assignments):
+        if self.shell != "zsh":
+            self.skipTest("zsh prompt rendering")
+        script = (
+            "PROMPT='> '\n"
+            f"source {ROOT}/shell/cloudctx.zsh\n"
+            "unset CLOUDCTX_CONTEXT CLOUDCTX_AZURE_LABEL AWS_PROFILE\n"
+            f"{assignments}\n"
+            'print -rP -- "CCTX=$PROMPT"\n'
+        )
+        r = subprocess.run(["zsh", "-f", "-c", script], cwd=self.home,
+                           env=self.env, capture_output=True, text=True)
+        return r, extract(r.stdout)
+
+    def test_zsh_prompt_renders_nothing_without_context(self):
+        r, val = self._render_zsh_prompt(":")
+        self.assertEqual(val, "> ", msg=r.stderr)
+
+    def test_zsh_prompt_renders_context_segment(self):
+        r, val = self._render_zsh_prompt(
+            "CLOUDCTX_CONTEXT=demo CLOUDCTX_AZURE_LABEL=sub AWS_PROFILE=p")
+        self.assertIsNotNone(val, msg=r.stderr)
+        self.assertEqual(ANSI.sub("", val), "[demo:sub aws:p] > ")
+        self.assertIn("\x1b[36m", val)  # cyan
+
+    def test_zsh_prompt_renders_name_only(self):
+        r, val = self._render_zsh_prompt("CLOUDCTX_CONTEXT=demo")
+        self.assertEqual(ANSI.sub("", val or ""), "[demo] > ", msg=r.stderr)
+
+    def test_zsh_prompt_renders_percent_literally(self):
+        r, val = self._render_zsh_prompt(
+            "CLOUDCTX_CONTEXT=demo CLOUDCTX_AZURE_LABEL='100%n'")
+        self.assertEqual(ANSI.sub("", val or ""), "[demo:100%n] > ", msg=r.stderr)
 
     def test_zsh_prompt_escapes_percent(self):
         # Finding #14: a '%' in the subscription label must not be a prompt escape.

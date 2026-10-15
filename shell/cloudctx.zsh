@@ -93,4 +93,6 @@ fi
 # `%` in the (free-form) values is doubled so it is rendered literally and can
 # never act as a prompt escape.
 setopt PROMPT_SUBST
-PROMPT='${CLOUDCTX_CONTEXT:+%F{cyan}[${CLOUDCTX_CONTEXT//\%/%%}${CLOUDCTX_AZURE_LABEL:+:${CLOUDCTX_AZURE_LABEL//\%/%%}}${AWS_PROFILE:+ aws:${AWS_PROFILE//\%/%%}}]%f }'"$PROMPT"
+# %6F is cyan in numeric form: a braced %F{cyan} would close the enclosing
+# ${CLOUDCTX_CONTEXT:+...} at its first `}` and break the whole segment.
+PROMPT='${CLOUDCTX_CONTEXT:+%6F[${CLOUDCTX_CONTEXT//\%/%%}${CLOUDCTX_AZURE_LABEL:+:${CLOUDCTX_AZURE_LABEL//\%/%%}}${AWS_PROFILE:+ aws:${AWS_PROFILE//\%/%%}}]%f }'"$PROMPT"
