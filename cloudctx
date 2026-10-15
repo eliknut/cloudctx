@@ -444,8 +444,9 @@ def shquote(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-def env_dict(name: str) -> dict:
-    """The environment a context exports, as a plain dict (shared by _env and exec)."""
+def env_dict(name: str, binding: Optional[dict] = None) -> dict:
+    """The environment a context exports, as a plain dict (shared by _env and exec).
+    A worktree binding for this context may pin the subscription."""
     entry = load_registry()[name]
     env = {
         "CLOUDCTX_CONTEXT": name,
@@ -471,11 +472,16 @@ def env_dict(name: str) -> dict:
         env["AWS_CONFIG_FILE"] = str(aws_config(name).resolve())
         env["AWS_SHARED_CREDENTIALS_FILE"] = str(aws_credentials(name).resolve())
         env["AWS_PROFILE"] = entry.get("aws_profile") or name
+    # A worktree binding's pin replaces the registry subscription in exactly
+    # these two variables (read_binding already enforced GUID shape).
+    if binding and binding.get("context") == name and binding.get("subscription"):
+        env["ARM_SUBSCRIPTION_ID"] = binding["subscription"]
+        env["CLOUDCTX_AZURE_LABEL"] = binding["subscription"]
     return env
 
 
-def env_lines(name: str) -> list:
-    env = env_dict(name)
+def env_lines(name: str, binding: Optional[dict] = None) -> list:
+    env = env_dict(name, binding)
     lines = [f"export {k}={shquote(v)}" for k, v in env.items()]
     # Explicitly unset every managed var this context does NOT set, so a single
     # eval fully *replaces* the previous context (no stale AWS_*/label bleed).
@@ -487,8 +493,17 @@ def cmd_env(args) -> int:
     if args.clear:
         print("\n".join(f"unset {var}" for var in CLEARABLE_VARS))
         return 0
+    if args.binding:
+        # Shim start-up path: an unusable binding prints nothing (the shim then
+        # leaves the shell alone) and load_binding_file has already warned.
+        loaded = load_binding_file(Path(args.binding))
+        if loaded is None:
+            return 0
+        _, binding = loaded
+        print("\n".join(env_lines(binding["context"], binding)))
+        return 0
     if not args.name:
-        return die("usage: cloudctx _env <name> | --clear")
+        return die("usage: cloudctx _env <name> | --binding <path> | --clear")
     if args.name not in load_registry():
         return die(f"unknown context {args.name!r}")
     print("\n".join(env_lines(args.name)))
@@ -1138,6 +1153,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_env = sub.add_parser("_env", help="(internal) emit shell export/unset lines")
     p_env.add_argument("name", nargs="?")
     p_env.add_argument("--clear", action="store_true")
+    p_env.add_argument("--binding", metavar="PATH",
+                       help="emit the env of the context bound by this .cloudctx file")
     p_env.set_defaults(func=cmd_env)
 
     p_dec = sub.add_parser("_decorate", help="(internal) emit iTerm2 escape sequences")

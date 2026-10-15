@@ -390,6 +390,79 @@ class TestBindingFile(Base):
         self.assertIn("ignoring binding", err.getvalue())
 
 
+class TestBindingEnv(Base):
+    TENANT = "11111111-2222-3333-4444-555555555555"
+    REG_SUB = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    PIN = "99999999-8888-7777-6666-555555555555"
+
+    def setUp(self):
+        super().setUp()
+        self.run_cli("new", "acme", "--azure-tenant", self.TENANT,
+                     "--azure-subscription", self.REG_SUB,
+                     "--aws-profile", "acme-ops", "--no-login")
+        self.dir = Path(tempfile.mkdtemp(prefix="cctx-env-")).resolve()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def run_split(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = self.cc.main(list(args))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_pin_overrides_exactly_two_vars(self):
+        plain = self.cc.env_dict("acme")
+        pinned = self.cc.env_dict("acme", {"context": "acme", "subscription": self.PIN})
+        self.assertEqual(pinned["ARM_SUBSCRIPTION_ID"], self.PIN)
+        self.assertEqual(pinned["CLOUDCTX_AZURE_LABEL"], self.PIN)
+        for key in set(plain) | set(pinned):
+            if key in ("ARM_SUBSCRIPTION_ID", "CLOUDCTX_AZURE_LABEL"):
+                continue
+            self.assertEqual(plain.get(key), pinned.get(key), key)
+
+    def test_binding_without_subscription_changes_nothing(self):
+        self.assertEqual(self.cc.env_dict("acme"),
+                         self.cc.env_dict("acme", {"context": "acme", "subscription": None}))
+
+    def test_binding_for_other_context_is_ignored(self):
+        self.assertEqual(self.cc.env_dict("acme"),
+                         self.cc.env_dict("acme", {"context": "globex", "subscription": self.PIN}))
+
+    def test_clearable_vars_still_nine(self):
+        self.assertEqual(len(self.cc.CLEARABLE_VARS), 9)
+
+    def test_env_binding_prints_pinned_lines(self):
+        p = self.dir / ".cloudctx"
+        p.write_text(f'context = "acme"\nsubscription = "{self.PIN}"\n')
+        code, out, err = self.run_split("_env", "--binding", str(p))
+        self.assertEqual(code, 0, err)
+        self.assertIn("export CLOUDCTX_CONTEXT='acme'", out)
+        self.assertIn(f"export ARM_SUBSCRIPTION_ID='{self.PIN}'", out)
+        self.assertIn(f"export CLOUDCTX_AZURE_LABEL='{self.PIN}'", out)
+        self.assertIn(f"export ARM_TENANT_ID='{self.TENANT}'", out)
+
+    def test_env_binding_replaces_previous_context(self):
+        self.run_cli("new", "bare", "--azure-tenant", "t", "--no-login")
+        p = self.dir / ".cloudctx"
+        p.write_text('context = "bare"\n')
+        _, out, _ = self.run_split("_env", "--binding", str(p))
+        self.assertIn("unset ARM_SUBSCRIPTION_ID", out)
+        self.assertIn("unset AWS_PROFILE", out)
+
+    def test_env_binding_invalid_prints_nothing_and_warns(self):
+        p = self.dir / ".cloudctx"
+        p.write_text('context = "nope"\n')
+        code, out, err = self.run_split("_env", "--binding", str(p))
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertIn("ignoring binding", err)
+
+    def test_env_binding_missing_file_prints_nothing(self):
+        code, out, err = self.run_split("_env", "--binding", str(self.dir / "absent"))
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertIn("ignoring binding", err)
+
+
 class TestDecorate(Base):
     def setUp(self):
         super().setUp()
