@@ -475,10 +475,20 @@ def _tabcolor_seq(hex6: str) -> str:
     return f"{ESC}]1337;SetColors=tab={hex6}{BEL}"
 
 
+def _is_iterm() -> bool:
+    """OSC 1337 (badge, tab colour) is iTerm2-only; other terminals (Orca,
+    VS Code, Terminal.app) may print it as garbage, so gate it."""
+    return (os.environ.get("TERM_PROGRAM") == "iTerm.app"
+            or os.environ.get("LC_TERMINAL") == "iTerm2")
+
+
 def decorate_bytes(name: str) -> str:
     entry = load_registry()[name]
     display = entry.get("display") or name
-    out = _badge_seq(display) + _title_seq(display)
+    out = _title_seq(display)  # OSC 0: every terminal
+    if not _is_iterm():
+        return out
+    out = _badge_seq(display) + out
     color = entry.get("color")
     if color:
         try:
@@ -489,6 +499,8 @@ def decorate_bytes(name: str) -> str:
 
 
 def decorate_clear() -> str:
+    if not _is_iterm():
+        return ""
     return (f"{ESC}]1337;SetBadgeFormat={BEL}"          # empty badge payload
             f"{ESC}]1337;SetColors=tab=default{BEL}")    # documented reset
 

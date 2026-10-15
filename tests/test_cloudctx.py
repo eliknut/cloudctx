@@ -293,6 +293,8 @@ class TestArmEnv(Base):
 class TestDecorate(Base):
     def setUp(self):
         super().setUp()
+        os.environ["TERM_PROGRAM"] = "iTerm.app"   # OSC 1337 is iTerm-only
+        os.environ.pop("LC_TERMINAL", None)
         self.run_cli("new", "acme", "--display", "Acme AB", "--color", "#c0392b",
                      "--azure-tenant", "t", "--no-login")
 
@@ -333,6 +335,45 @@ class TestDecorate(Base):
         _, out = self.run_cli("_decorate", "nocolor")
         self.assertNotIn("SetColors=tab=", out)
         self.assertIn("SetBadgeFormat=", out)  # badge still set
+
+
+class TestDecorateTerminal(Base):
+    def setUp(self):
+        super().setUp()
+        os.environ.pop("TERM_PROGRAM", None)
+        os.environ.pop("LC_TERMINAL", None)
+        self.run_cli("new", "acme", "--display", "Acme AB", "--color", "#c0392b",
+                     "--azure-tenant", "t", "--no-login")
+
+    def test_orca_gets_title_only(self):
+        os.environ["TERM_PROGRAM"] = "Orca"
+        _, out = self.run_cli("_decorate", "acme")
+        self.assertIn("\x1b]0;Acme AB\x07", out)
+        self.assertNotIn("1337", out)
+
+    def test_no_terminal_hint_gets_title_only(self):
+        _, out = self.run_cli("_decorate", "acme")
+        self.assertIn("\x1b]0;Acme AB\x07", out)
+        self.assertNotIn("1337", out)
+
+    def test_lc_terminal_iterm2_gets_badge_and_tab(self):
+        os.environ["TERM_PROGRAM"] = "tmux"
+        os.environ["LC_TERMINAL"] = "iTerm2"
+        _, out = self.run_cli("_decorate", "acme")
+        self.assertIn("SetBadgeFormat=", out)
+        self.assertIn("SetColors=tab=c0392b", out)
+        self.assertIn("\x1b]0;Acme AB\x07", out)
+
+    def test_clear_outside_iterm_sends_no_1337(self):
+        os.environ["TERM_PROGRAM"] = "Orca"
+        code, out = self.run_cli("_decorate", "--clear")
+        self.assertEqual(code, 0)
+        self.assertNotIn("1337", out)
+
+    def test_clear_under_iterm_resets(self):
+        os.environ["TERM_PROGRAM"] = "iTerm.app"
+        _, out = self.run_cli("_decorate", "--clear")
+        self.assertIn("SetColors=tab=default", out)
 
 
 class TestExecStatus(Base):
