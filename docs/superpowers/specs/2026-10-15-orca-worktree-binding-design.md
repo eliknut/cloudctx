@@ -78,12 +78,16 @@ A binding is ignored, with one line on stderr, when its file cannot be parsed
 or names a context that is not in the registry.
 
 A binding is also ignored, with one line on stderr, unless `cloudctx bind`
-created it: `bind` records the folder's path and a sha256 of the file in
-`$CLOUDCTX_HOME/trusted-bindings.json` (owner-only), and a file that is
-missing from that record, has changed since, or is a symlink is not used.
-`unbind` removes the record. This keeps a `.cloudctx` committed to a cloned
-repo, or copied in by another tool, from switching a shell to one of your
-contexts. (Added 2026-10-15 after a security review.)
+created it: `bind` records, in `$CLOUDCTX_HOME/trusted-bindings.json`
+(owner-only), the file's path, a sha256 of its bytes, its device and inode,
+and the context's tenant/account identity (`azure_tenant`, `aws_account_id`,
+`aws_sso_start_url`). A file that is missing from that record, has changed
+since, is a symlink, or whose context now points at another tenant or account
+is not used. Moving a worktree, re-creating its folder, or changing a
+context's tenant therefore needs `cloudctx bind` again. `unbind` removes the
+record. This keeps a `.cloudctx` committed to a cloned repo, or copied in by
+another tool, from switching a shell to one of your contexts. (Added
+2026-10-15 after a security review.)
 
 ## 4. Which context wins
 

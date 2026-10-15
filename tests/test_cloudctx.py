@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -317,7 +318,11 @@ class TestBindingFile(Base):
         folder.mkdir(parents=True, exist_ok=True)
         p = folder / ".cloudctx"
         p.write_text(text, encoding="utf-8")
-        return trust(self.cc, p)
+        try:
+            trust(self.cc, p)
+        except self.cc.BindingError:
+            pass  # unparsable on purpose: rejected before the trust check
+        return p
 
     def test_find_binding_nearest_wins(self):
         outer = self.write(self.root, 'context = "acme"\n')
@@ -599,8 +604,52 @@ class TestBindingTrust(Base):
 
     def test_symlinked_file_is_ignored(self):
         p = self.bind_in(self.a, "acme")
-        (self.b / ".cloudctx").symlink_to(p)
-        self.assert_untrusted(self.b)
+        # A hard link keeps bytes, dev and ino identical, so only the
+        # symlink rule can reject this.
+        elsewhere = self.b / "target"
+        os.link(str(p), str(elsewhere))
+        p.unlink()
+        p.symlink_to(elsewhere)
+        self.assert_untrusted(self.a)
+
+    def test_path_reuse_is_ignored(self):
+        p = self.bind_in(self.a, "acme")
+        text = p.read_text()
+        os.chdir(self.base)
+        shutil.rmtree(str(self.a))
+        self.a.mkdir()
+        (self.a / ".cloudctx").write_text(text)
+        self.assert_untrusted(self.a)
+        self.bind_in(self.a, "acme")
+        self.assertIsNotNone(self.load_quiet(self.a)[0])
+
+    def test_recreated_context_with_other_tenant_is_ignored(self):
+        self.bind_in(self.a, "acme")
+        reg = self.cc.load_registry()
+        reg["acme"]["azure_tenant"] = "other-tenant"
+        self.cc.save_registry(reg)
+        self.assert_untrusted(self.a)
+        self.bind_in(self.a, "acme")
+        self.assertIsNotNone(self.load_quiet(self.a)[0])
+
+    def test_old_format_record_is_ignored(self):
+        p = self.bind_in(self.a, "acme")
+        key = self.cc.binding_key(p)
+        self.cc.trust_path().write_text(
+            json.dumps({key: self.cc.binding_digest(p)}))
+        self.assertEqual(self.cc.load_trusted(), {})
+        self.assert_untrusted(self.a)
+
+    def test_unbind_reports_unwritable_trust_file(self):
+        # A 0500 CLOUDCTX_HOME is not enough: the writer re-chmods it 0700.
+        self.bind_in(self.a, "acme")
+        def denied(_data):
+            raise PermissionError(13, "Permission denied", str(self.cc.trust_path()))
+        with unittest.mock.patch.object(self.cc, "_save_trusted", denied):
+            code, out = self.run_cli("unbind")
+        self.assertEqual(code, 1)
+        self.assertIn("cannot update", out)
+        self.assertNotIn("Traceback", out)
 
     def test_unbind_removes_trust(self):
         p = self.bind_in(self.a, "acme")
