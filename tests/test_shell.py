@@ -401,6 +401,20 @@ class TestShimZsh(unittest.TestCase):
         self.assertEqual(extract(r.stdout), "||", msg=r.stderr)
         self.assertIn("ignoring binding", r.stderr)
 
+    def test_bound_notice_strips_control_chars(self):
+        d = self.bound_dir(name="w\x1b]0;pwned\x07x")
+        r = self.run_in(d, "true", interactive=True)
+        self.assertIn("cloudctx: acme (bound by ", r.stderr)
+        self.assertIn("w?]0;pwned?x/.cloudctx)", r.stderr)
+        self.assertNotIn("\x1b", r.stderr)
+        self.assertNotIn("\x07", r.stderr)
+
+    def test_start_with_captured_stdout_writes_no_escape(self):
+        d = self.bound_dir()
+        r = self.run_in(d, self._show())
+        self.assertNotIn("\x1b", r.stdout)
+        self.assertEqual(extract(r.stdout), f"acme|{self.PIN}|{self.PIN}", msg=r.stderr)
+
     def _stub_env(self):
         stub = Path(tempfile.mkdtemp(prefix="cctx-stub-"))
         self.addCleanup(shutil.rmtree, stub, ignore_errors=True)

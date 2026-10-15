@@ -137,9 +137,13 @@ _cloudctx_apply_binding() {
   _cloudctx_env="$(command cloudctx _env --binding "$_cloudctx_binding")" || return 0
   [ -n "$_cloudctx_env" ] || return 0
   eval "$_cloudctx_env"
-  command cloudctx _decorate "$CLOUDCTX_CONTEXT"
-  case $- in
-    *i*) echo "cloudctx: $CLOUDCTX_CONTEXT (bound by $_cloudctx_binding)" >&2 ;;
-  esac
+  # Title escapes only to a terminal: rc files sourced with captured stdout
+  # (environment probes, shell snapshots) must not get escape bytes.
+  [[ -t 1 ]] && command cloudctx _decorate "$CLOUDCTX_CONTEXT"
+  if [[ $- == *i* ]]; then
+    # Control characters in a folder name must never reach the terminal.
+    local _n=${CLOUDCTX_CONTEXT//[[:cntrl:]]/?} _p=${_cloudctx_binding//[[:cntrl:]]/?}
+    printf '%s\n' "cloudctx: $_n (bound by $_p)" >&2
+  fi
 }
 _cloudctx_apply_binding
