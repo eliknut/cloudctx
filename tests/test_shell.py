@@ -52,7 +52,7 @@ class TestShimZsh(unittest.TestCase):
 
     def run_script(self, body):
         script = f"source {ROOT}/shell/cloudctx.{self.shell}\n" + textwrap.dedent(body)
-        r = subprocess.run([self.shell, self.rcflag, "-c", script],
+        r = subprocess.run([self.shell, self.rcflag, "-c", script], cwd=self.home,
                            env=self.env, capture_output=True, text=True)
         return r
 
@@ -292,7 +292,7 @@ class TestShimZsh(unittest.TestCase):
             'echo "CCTX=$(declare -p preexec_functions)|$(trap -p DEBUG)"\n'
         )
         r = subprocess.run([self.shell, "--norc", "--noprofile", "-c", script],
-                           env=self.env, capture_output=True, text=True)
+                           cwd=self.home, env=self.env, capture_output=True, text=True)
         val = extract(r.stdout) or ""
         self.assertIn("_cloudctx_bp_preexec", val, msg=r.stderr)   # we registered
         self.assertIn("echo PRIOR", val, msg="our shim clobbered the DEBUG trap")
@@ -304,7 +304,7 @@ class TestShimZsh(unittest.TestCase):
         script = (f"source {ROOT}/shell/cloudctx.bash\n"
                   'echo "CCTX=$(trap -p DEBUG)"\n')
         r = subprocess.run([self.shell, "--norc", "--noprofile", "-c", script],
-                           env=self.env, capture_output=True, text=True)
+                           cwd=self.home, env=self.env, capture_output=True, text=True)
         self.assertIn("cloudctx_debug", extract(r.stdout) or "", msg=r.stderr)
 
     def test_bash_completion_offers_bind(self):
@@ -325,6 +325,116 @@ class TestShimZsh(unittest.TestCase):
         self.assertEqual(lines[0], f"{MARK}bind", msg=r.stderr)
         self.assertIn("acme", lines[1])
 
+    PIN = "99999999-8888-7777-6666-555555555555"
+
+    def _argv(self, interactive=False):
+        flags = ["-f"] if self.shell == "zsh" else ["--norc", "--noprofile"]
+        return [self.shell, *flags, *(["-i"] if interactive else [])]
+
+    def run_in(self, cwd, body, env=None, interactive=False):
+        script = f"source {ROOT}/shell/cloudctx.{self.shell}\n" + textwrap.dedent(body)
+        return subprocess.run([*self._argv(interactive), "-c", script], cwd=str(cwd),
+                              env=env or self.env, capture_output=True, text=True)
+
+    def _show(self):
+        echo = "print -r --" if self.shell == "zsh" else "echo"
+        return f'{echo} "{MARK}$CLOUDCTX_CONTEXT|$ARM_SUBSCRIPTION_ID|$CLOUDCTX_AZURE_LABEL"'
+
+    def bound_dir(self, name="bound", text=None):
+        # resolve(): the shell reports the physical path (/private/var on macOS)
+        d = Path(tempfile.mkdtemp(prefix="cctx-wt-")).resolve() / name
+        self.addCleanup(shutil.rmtree, d.parent, ignore_errors=True)
+        d.mkdir()
+        (d / ".cloudctx").write_text(
+            text or f'context = "acme"\nsubscription = "{self.PIN}"\n')
+        (d / "sub").mkdir()
+        return d
+
+    def test_start_in_bound_folder_activates(self):
+        d = self.bound_dir()
+        r = self.run_in(d / "sub", self._show())
+        self.assertEqual(extract(r.stdout), f"acme|{self.PIN}|{self.PIN}", msg=r.stderr)
+
+    def test_binding_overrides_inherited_context(self):
+        d = self.bound_dir()
+        env = dict(self.env, CLOUDCTX_CONTEXT="other", ARM_SUBSCRIPTION_ID="stale",
+                   AWS_PROFILE="stale-profile")
+        r = self.run_in(d, self._show() + "\n" +
+                        ('print -r -- "CCTX2=${AWS_PROFILE-unset}"' if self.shell == "zsh"
+                         else 'echo "CCTX2=${AWS_PROFILE-unset}"'), env=env)
+        self.assertEqual(extract(r.stdout), f"acme|{self.PIN}|{self.PIN}", msg=r.stderr)
+        self.assertIn("CCTX2=unset", r.stdout)
+
+    def test_use_after_start_wins(self):
+        self._new("globex", "--azure-tenant", "t2", "--azure-subscription", "Other")
+        d = self.bound_dir()
+        r = self.run_in(d, "cloudctx use globex >/dev/null\n" + self._show())
+        self.assertEqual(extract(r.stdout), "globex||Other", msg=r.stderr)
+
+    def test_cd_into_bound_folder_changes_nothing(self):
+        d = self.bound_dir()
+        plain = Path(tempfile.mkdtemp(prefix="cctx-plain-")).resolve()
+        self.addCleanup(shutil.rmtree, plain, ignore_errors=True)
+        r = self.run_in(plain, f'cd "{d}"\n' + self._show())
+        self.assertEqual(extract(r.stdout), "||", msg=r.stderr)
+
+    def test_interactive_start_prints_bound_line(self):
+        d = self.bound_dir()
+        r = self.run_in(d, "true", interactive=True)
+        self.assertIn(f"cloudctx: acme (bound by {d}/.cloudctx)", r.stderr)
+
+    def test_non_interactive_start_is_silent(self):
+        d = self.bound_dir()
+        r = self.run_in(d, "true")
+        self.assertNotIn("bound by", r.stderr)
+
+    def test_binding_in_path_with_space_and_quote(self):
+        d = self.bound_dir(name="it's bound")
+        r = self.run_in(d, self._show(), interactive=True)
+        self.assertEqual(extract(r.stdout), f"acme|{self.PIN}|{self.PIN}", msg=r.stderr)
+        self.assertIn(f"(bound by {d}/.cloudctx)", r.stderr)
+
+    def test_unknown_context_binding_is_ignored(self):
+        d = self.bound_dir(text='context = "nope"\n')
+        r = self.run_in(d, self._show())
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(extract(r.stdout), "||", msg=r.stderr)
+        self.assertIn("ignoring binding", r.stderr)
+
+    def _stub_env(self):
+        stub = Path(tempfile.mkdtemp(prefix="cctx-stub-"))
+        self.addCleanup(shutil.rmtree, stub, ignore_errors=True)
+        log = stub / "calls.log"
+        p = stub / "cloudctx"
+        p.write_text(f'#!/bin/sh\necho "$*" >> "{log}"\n')
+        p.chmod(0o755)
+        env = dict(self.env)
+        env["PATH"] = f"{stub}:{env['PATH']}"
+        return env, log
+
+    def test_start_outside_binding_runs_no_cloudctx(self):
+        env, log = self._stub_env()
+        plain = Path(tempfile.mkdtemp(prefix="cctx-plain-")).resolve()
+        self.addCleanup(shutil.rmtree, plain, ignore_errors=True)
+        r = self.run_in(plain, "true", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(log.exists(), log.read_text() if log.exists() else "")
+
+    def test_registry_dir_named_cloudctx_is_not_a_binding(self):
+        env, log = self._stub_env()
+        top = Path(tempfile.mkdtemp(prefix="cctx-home-")).resolve()
+        self.addCleanup(shutil.rmtree, top, ignore_errors=True)
+        (top / ".cloudctx").mkdir()          # like ~/.cloudctx
+        (top / "proj").mkdir()
+        r = self.run_in(top / "proj", "true", env=env)
+        self.assertFalse(log.exists(), r.stderr)
+
+    def test_start_in_bound_folder_calls_env_binding(self):
+        env, log = self._stub_env()
+        d = self.bound_dir()
+        self.run_in(d, "true", env=env)
+        self.assertIn(f"_env --binding {d}/.cloudctx", log.read_text())
+
 
 @unittest.skipUnless(shutil.which("bash"), "bash not installed")
 class TestShimBash(TestShimZsh):
@@ -335,7 +445,7 @@ class TestShimBash(TestShimZsh):
     def run_script(self, body):
         script = f"source {ROOT}/shell/cloudctx.{self.shell}\n" + textwrap.dedent(body)
         r = subprocess.run([self.shell, "--norc", "--noprofile", "-c", script],
-                           env=self.env, capture_output=True, text=True)
+                           cwd=self.home, env=self.env, capture_output=True, text=True)
         return r
 
 

@@ -96,3 +96,37 @@ setopt PROMPT_SUBST
 # %6F is cyan in numeric form: a braced %F{cyan} would close the enclosing
 # ${CLOUDCTX_CONTEXT:+...} at its first `}` and break the whole segment.
 PROMPT='${CLOUDCTX_CONTEXT:+%6F[${CLOUDCTX_CONTEXT//\%/%%}${CLOUDCTX_AZURE_LABEL:+:${CLOUDCTX_AZURE_LABEL//\%/%%}}${AWS_PROFILE:+ aws:${AWS_PROFILE//\%/%%}}]%f }'"$PROMPT"
+
+# --- worktree binding (runs once, now) -------------------------------------
+# Walk up from $PWD in pure shell for a regular file named .cloudctx (a
+# directory with that name, like the registry root ~/.cloudctx, never counts).
+# Only when one exists does the binary run, so an unbound shell pays nothing.
+# Nothing hooks chpwd/precmd: a binding applies at shell start only.
+_cloudctx_find_binding() {
+  emulate -L zsh
+  local d=$PWD
+  typeset -g _cloudctx_binding=
+  while :; do
+    if [[ -f "${d%/}/.cloudctx" ]]; then
+      _cloudctx_binding="${d%/}/.cloudctx"
+      return 0
+    fi
+    [[ -z "$d" || "$d" == / ]] && return 1
+    d=${d%/*}
+    [[ -n "$d" ]] || d=/
+  done
+}
+
+_cloudctx_apply_binding() {
+  emulate -L zsh
+  _cloudctx_find_binding || return 0
+  local _cloudctx_env
+  _cloudctx_env="$(command cloudctx _env --binding "$_cloudctx_binding")" || return 0
+  [[ -n "$_cloudctx_env" ]] || return 0
+  eval "$_cloudctx_env"
+  command cloudctx _decorate "$CLOUDCTX_CONTEXT"
+  if [[ -o interactive ]]; then
+    print -u2 -r -- "cloudctx: $CLOUDCTX_CONTEXT (bound by $_cloudctx_binding)"
+  fi
+}
+_cloudctx_apply_binding
