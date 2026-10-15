@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional, Tuple
 
 __version__ = "1.5.0"
 
@@ -355,6 +356,75 @@ def save_registry(data: dict) -> None:
     tmp.write_text(_dump_toml(data), encoding="utf-8")
     _chmod(tmp, 0o600)   # contexts.toml holds tenant/account identifiers
     os.replace(tmp, path)  # atomic on POSIX
+
+
+# --------------------------------------------------------------------------
+# Worktree binding. A regular file `.cloudctx` binds the folder it sits in
+# (and everything below) to one context, optionally pinned to one subscription.
+# The nearest file walking up from a directory wins. A directory with that
+# name (the default registry root ~/.cloudctx is one) is never a binding.
+# --------------------------------------------------------------------------
+BINDING_FILE = ".cloudctx"
+
+
+class BindingError(Exception):
+    """A .cloudctx file that cannot be used."""
+
+
+def find_binding(start: Path) -> Optional[Path]:
+    """First regular file named .cloudctx from `start` up to /, or None."""
+    here = Path(start).absolute()
+    for folder in (here, *here.parents):
+        candidate = folder / BINDING_FILE
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def read_binding(path: Path) -> dict:
+    """Parse a binding file. Returns {"context": str, "subscription": str|None}."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise BindingError(f"cannot read {path}: {e}")
+    try:
+        if _tomllib is not None:
+            data = _tomllib.loads(text)
+        else:
+            # _parse_toml drops keys outside a [table]; give it one.
+            data = _parse_toml("[binding]\n" + text).get("binding", {})
+    except Exception as e:
+        raise BindingError(f"cannot parse {path}: {e}")
+    context = data.get("context")
+    if not isinstance(context, str) or not NAME_RE.match(context):
+        raise BindingError(f'{path} has no valid context = "<name>" line')
+    subscription = data.get("subscription")
+    if subscription is not None and (not isinstance(subscription, str)
+                                     or not GUID_RE.match(subscription)):
+        raise BindingError(f"{path}: subscription must be a GUID")
+    return {"context": context, "subscription": subscription}
+
+
+def load_binding_file(path: Path) -> Optional[Tuple[Path, dict]]:
+    """read_binding plus a registry check. Unusable: one stderr line, None."""
+    try:
+        binding = read_binding(path)
+    except BindingError as e:
+        print(f"cloudctx: warning: ignoring binding: {e}", file=sys.stderr)
+        return None
+    if binding["context"] not in load_registry():
+        print(f"cloudctx: warning: ignoring binding {path}: unknown context "
+              f"{binding['context']!r}", file=sys.stderr)
+        return None
+    return Path(path), binding
+
+
+def load_binding_for(start: Path) -> Optional[Tuple[Path, dict]]:
+    """The usable binding that applies to `start`, or None."""
+    path = find_binding(start)
+    if path is None:
+        return None
+    return load_binding_file(path)
 
 
 # --------------------------------------------------------------------------

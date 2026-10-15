@@ -290,6 +290,106 @@ class TestArmEnv(Base):
         self.assertIn("unset ARM_SUBSCRIPTION_ID", out)
 
 
+class TestBindingFile(Base):
+    SUB = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    def setUp(self):
+        super().setUp()
+        self.run_cli("new", "acme", "--azure-tenant", "t", "--no-login")
+        self.root = Path(tempfile.mkdtemp(prefix="cctx-bind-")).resolve()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def write(self, folder, text):
+        folder.mkdir(parents=True, exist_ok=True)
+        p = folder / ".cloudctx"
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def test_find_binding_nearest_wins(self):
+        outer = self.write(self.root, 'context = "acme"\n')
+        inner = self.write(self.root / "a", 'context = "acme"\n')
+        start = self.root / "a" / "b" / "c"
+        start.mkdir(parents=True)
+        self.assertEqual(self.cc.find_binding(start), inner)
+        self.assertEqual(self.cc.find_binding(self.root), outer)
+
+    def test_find_binding_none(self):
+        start = self.root / "x"
+        start.mkdir()
+        self.assertIsNone(self.cc.find_binding(start))
+
+    def test_directory_named_cloudctx_is_skipped(self):
+        # ~/.cloudctx (the registry root) is a directory on every machine.
+        outer = self.write(self.root, 'context = "acme"\n')
+        (self.root / "a" / ".cloudctx").mkdir(parents=True)
+        self.assertEqual(self.cc.find_binding(self.root / "a"), outer)
+
+    def test_binding_above_git_toplevel_is_found(self):
+        if not shutil.which("git"):
+            self.skipTest("git not installed")
+        outer = self.write(self.root, 'context = "acme"\n')
+        repo = self.root / "plain" / "repo"
+        (repo / "sub").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self.assertEqual(self.cc.find_binding(repo / "sub"), outer)
+
+    def test_read_binding_with_subscription(self):
+        p = self.write(self.root, f'context = "acme"\nsubscription = "{self.SUB}"\n')
+        self.assertEqual(self.cc.read_binding(p),
+                         {"context": "acme", "subscription": self.SUB})
+
+    def test_read_binding_without_subscription(self):
+        p = self.write(self.root, 'context = "acme"\n')
+        self.assertEqual(self.cc.read_binding(p),
+                         {"context": "acme", "subscription": None})
+
+    def test_read_binding_rejects_missing_context(self):
+        p = self.write(self.root, f'subscription = "{self.SUB}"\n')
+        with self.assertRaises(self.cc.BindingError):
+            self.cc.read_binding(p)
+
+    def test_read_binding_rejects_non_guid_subscription(self):
+        p = self.write(self.root, 'context = "acme"\nsubscription = "Prod"\n')
+        with self.assertRaises(self.cc.BindingError):
+            self.cc.read_binding(p)
+
+    def test_read_binding_rejects_garbage(self):
+        p = self.write(self.root, "this is [not toml\n")
+        with self.assertRaises(self.cc.BindingError):
+            self.cc.read_binding(p)
+
+    def test_load_binding_for_ok(self):
+        p = self.write(self.root, 'context = "acme"\n')
+        self.assertEqual(self.cc.load_binding_for(self.root),
+                         (p, {"context": "acme", "subscription": None}))
+
+    def test_load_binding_for_unknown_context_warns(self):
+        self.write(self.root, 'context = "nope"\n')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(self.cc.load_binding_for(self.root))
+        self.assertIn("ignoring binding", err.getvalue())
+        self.assertIn("unknown context", err.getvalue())
+
+    def test_load_binding_for_unparsable_warns(self):
+        self.write(self.root, "garbage\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(self.cc.load_binding_for(self.root))
+        self.assertIn("ignoring binding", err.getvalue())
+
+    def test_unreadable_file_warns_and_is_ignored(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read mode-000 files")
+        p = self.write(self.root, 'context = "acme"\n')
+        p.chmod(0)
+        self.addCleanup(p.chmod, 0o644)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(self.cc.load_binding_for(self.root))
+        self.assertIn("ignoring binding", err.getvalue())
+
+
 class TestDecorate(Base):
     def setUp(self):
         super().setUp()
