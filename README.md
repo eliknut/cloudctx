@@ -134,7 +134,8 @@ subscription pin in `ARM_SUBSCRIPTION_ID`.
   written by hand, committed to a repo, copied, symlinked or edited is ignored
   with a one-line warning, so a file in a repo can never switch your context.
   Run `cloudctx bind` again after moving a worktree, re-creating its folder or
-  changing a context's tenant.
+  changing a context's tenant, and pass `--subscription` again if the worktree
+  pins one (without it the pin is dropped).
 - Orca's default Claude command is `claude --dangerously-skip-permissions`,
   which turns off every permission prompt. Set the Claude agent command to
   plain `claude` under Settings, Agents, so approval rules still apply.

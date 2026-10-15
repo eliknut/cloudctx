@@ -379,8 +379,11 @@ def find_binding(start: Path) -> Optional[Path]:
     here = Path(start).absolute()
     for folder in (here, *here.parents):
         candidate = folder / BINDING_FILE
-        if candidate.is_file():
-            return candidate
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue  # an untraversable ancestor: not a binding here
     return None
 
 
@@ -393,14 +396,14 @@ def _parse_binding_text(text: str, path) -> dict:
             # _parse_toml drops keys outside a [table]; give it one.
             data = _parse_toml("[binding]\n" + text).get("binding", {})
     except Exception as e:
-        raise BindingError(f"cannot parse {path}: {e}")
+        raise BindingError(f"cannot parse {_p(path)}: {_p(e)}")
     context = data.get("context")
     if not isinstance(context, str) or not NAME_RE.match(context):
-        raise BindingError(f'{path} has no valid context = "<name>" line')
+        raise BindingError(f'{_p(path)} has no valid context = "<name>" line')
     subscription = data.get("subscription")
     if subscription is not None and (not isinstance(subscription, str)
                                      or not GUID_RE.match(subscription)):
-        raise BindingError(f"{path}: subscription must be a GUID")
+        raise BindingError(f"{_p(path)}: subscription must be a GUID")
     return {"context": context, "subscription": subscription}
 
 
@@ -409,7 +412,7 @@ def read_binding(path: Path) -> dict:
     try:
         text = Path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
-        raise BindingError(f"cannot read {path}: {e}")
+        raise BindingError(f"cannot read {_p(path)}: {_p(e)}")
     return _parse_binding_text(text, path)
 
 
@@ -480,7 +483,18 @@ def load_trusted() -> dict:
     return {k: v for k, v in data.items() if isinstance(k, str) and _valid_record(v)}
 
 
+def _prune_trusted(data: dict) -> dict:
+    """Drop records whose folder no longer exists (removed worktrees)."""
+    def alive(key):
+        try:
+            return Path(key).parent.is_dir()
+        except OSError:
+            return True  # cannot tell: keep it
+    return {k: v for k, v in data.items() if alive(k)}
+
+
 def _save_trusted(data: dict) -> None:
+    data = _prune_trusted(data)
     root = REGISTRY_ROOT()
     root.mkdir(parents=True, exist_ok=True)
     _chmod(root, 0o700)
@@ -544,9 +558,12 @@ def is_trusted(path: Path) -> bool:
     return _matches_record(path, data, st, context)
 
 
-def _warn_untrusted(path, context: str) -> None:
-    print(f"cloudctx: warning: ignoring untrusted binding {path}; run "
-          f"'cloudctx bind {context}' in that folder to trust it", file=sys.stderr)
+def _warn_untrusted(path, context: str, subscription: Optional[str] = None) -> None:
+    hint = f"cloudctx bind {context}"
+    if subscription:
+        hint += f" --subscription {subscription}"
+    print(f"cloudctx: warning: ignoring untrusted binding {_p(path)}; run "
+          f"'{hint}' in that folder to trust it", file=sys.stderr)
 
 
 def load_binding_file(path: Path) -> Optional[Tuple[Path, dict]]:
@@ -557,7 +574,7 @@ def load_binding_file(path: Path) -> Optional[Tuple[Path, dict]]:
         data, st = _read_nofollow(path)
     except OSError as e:
         if e.errno != errno.ELOOP:
-            print(f"cloudctx: warning: ignoring binding: cannot read {path}: {e}",
+            print(f"cloudctx: warning: ignoring binding: cannot read {_p(path)}: {_p(e)}",
                   file=sys.stderr)
             return None
     try:
@@ -567,17 +584,17 @@ def load_binding_file(path: Path) -> Optional[Tuple[Path, dict]]:
             try:
                 text = data.decode("utf-8")
             except UnicodeDecodeError as e:
-                raise BindingError(f"cannot read {path}: {e}")
+                raise BindingError(f"cannot read {_p(path)}: {_p(e)}")
             binding = _parse_binding_text(text, path)
     except BindingError as e:
-        print(f"cloudctx: warning: ignoring binding: {e}", file=sys.stderr)
+        print(f"cloudctx: warning: ignoring binding: {_p(e)}", file=sys.stderr)
         return None
     if binding["context"] not in load_registry():
-        print(f"cloudctx: warning: ignoring binding {path}: unknown context "
+        print(f"cloudctx: warning: ignoring binding {_p(path)}: unknown context "
               f"{binding['context']!r}", file=sys.stderr)
         return None
     if data is None or not _matches_record(Path(path), data, st, binding["context"]):
-        _warn_untrusted(path, binding["context"])
+        _warn_untrusted(path, binding["context"], binding["subscription"])
         return None
     return Path(path), binding
 
@@ -662,20 +679,38 @@ def ensure_excluded(common_dir: Path) -> None:
     exclude.write_text(text + BINDING_FILE + "\n", encoding="utf-8")
 
 
+def _cwd_or_none() -> Optional[Path]:
+    try:
+        return Path.cwd()
+    except OSError:
+        return None
+
+
+def _p(path) -> str:
+    """A path for a user-visible message: control characters dropped so a
+    crafted folder name cannot send terminal escape sequences."""
+    return _strip_controls(str(path))
+
+
 def _show_binding(cwd: Path) -> int:
-    found = load_binding_for(cwd)
+    try:
+        found = load_binding_for(cwd)
+    except OSError as e:
+        return die(f"cannot look up a binding here: {_p(e)}")
     if found is None:
         print("no binding")
         return 0
     path, binding = found
-    print(f"binding:      {path}")
+    print(f"binding:      {_p(path)}")
     print(f"context:      {binding['context']}")
     print(f"subscription: {binding['subscription'] or '(registry default)'}")
     return 0
 
 
 def cmd_bind(args) -> int:
-    cwd = Path.cwd()
+    cwd = _cwd_or_none()
+    if cwd is None:
+        return die("cannot read the current folder (was it deleted?)")
     if not args.name:
         if args.subscription:
             return die("usage: cloudctx bind <name> [--subscription <guid>]")
@@ -693,45 +728,51 @@ def cmd_bind(args) -> int:
     folder, common = binding_target(cwd)
     resolved = folder.resolve()
     if resolved in (Path.home().resolve(), Path("/")):
-        return die(f"refusing to bind {resolved}: a binding there would apply "
+        return die(f"refusing to bind {_p(resolved)}: a binding there would apply "
                    "to every shell below it")
     if common is not None:
         tracked = _git_in_worktree(folder, "ls-files", "--error-unmatch", "--",
                                    BINDING_FILE)
         if tracked is not None and tracked.returncode == 0:
-            return die(f"{folder / BINDING_FILE} is tracked by git; a committed "
+            return die(f"{_p(folder / BINDING_FILE)} is tracked by git; a committed "
                        "binding would apply to everyone who clones the repo")
     try:
         path = write_binding(folder, args.name, sub)
     except OSError as e:
-        return die(f"cannot write {folder / BINDING_FILE}: {e}")
+        return die(f"cannot write {_p(folder / BINDING_FILE)}: {_p(e)}")
     try:
         trust_binding(path, binding_text(args.name, sub))
     except OSError as e:
-        return die(f"cannot record trust for {path} in {trust_path()}: {e}")
+        return die(f"cannot record trust for {_p(path)} in {_p(trust_path())}: {_p(e)}")
     if common is not None:
         try:
             ensure_excluded(common)
         except OSError as e:
-            print(f"cloudctx: warning: could not update {common}/info/exclude: {e}",
+            print(f"cloudctx: warning: could not update {_p(common)}/info/exclude: {_p(e)}",
                   file=sys.stderr)
-    print(f"bound {path} to {args.name}"
+    if common is None:
+        print(f"cloudctx: note: {_p(folder)} is not in a git repo; this binding "
+              "applies to every folder below it", file=sys.stderr)
+    print(f"bound {_p(path)} to {args.name}"
           + (f" (subscription {sub})" if sub else ""))
     return 0
 
 
 def cmd_unbind(args) -> int:
-    folder, _ = binding_target(Path.cwd())
+    cwd = _cwd_or_none()
+    if cwd is None:
+        return die("cannot read the current folder (was it deleted?)")
+    folder, _ = binding_target(cwd)
     path = folder / BINDING_FILE
     try:
         untrust_binding(path)
     except OSError as e:
-        return die(f"cannot update {trust_path()}: {e}")
+        return die(f"cannot update {_p(trust_path())}: {_p(e)}")
     if not path.is_file():
-        print(f"no binding at {path}")
+        print(f"no binding at {_p(path)}")
         return 0
     path.unlink()
-    print(f"removed {path}")
+    print(f"removed {_p(path)}")
     return 0
 
 
@@ -999,7 +1040,10 @@ def cmd_exec(args) -> int:
     # this context's, so exec is fail-closed (no other context's AWS_* leaks in).
     env = {k: v for k, v in os.environ.items() if k not in CLEARABLE_VARS}
     binding = None
-    found = load_binding_for(Path.cwd())
+    try:
+        found = load_binding_for(Path.cwd())
+    except OSError:
+        found = None  # deleted or unreadable cwd: run as without a binding
     if found is not None:
         _, bound = found
         if bound["context"] == name:

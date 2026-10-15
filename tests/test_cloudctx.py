@@ -1583,3 +1583,131 @@ class TestVersion(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFinalReviewFixes(Base):
+    PIN = "99999999-8888-7777-6666-555555555555"
+    REG_SUB = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(os.chdir, os.getcwd())
+        self.run_cli("new", "acme", "--azure-tenant", "t",
+                     "--azure-subscription", self.REG_SUB, "--no-login")
+        self.base = Path(tempfile.mkdtemp(prefix="cctx-final-")).resolve()
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+
+    def env(self):
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        return env
+
+    # 1. deleted cwd / untraversable ancestor
+    def test_exec_from_deleted_cwd_runs(self):
+        gone = self.base / "gone"
+        gone.mkdir()
+        script = ('import os,subprocess,sys; os.chdir(sys.argv[1]); os.rmdir(sys.argv[1]); '
+                  'r=subprocess.run([sys.argv[2],"exec","acme","--","/bin/sh","-c",'
+                  '"printf %s \\"$ARM_SUBSCRIPTION_ID\\""],capture_output=True,text=True); '
+                  'sys.stdout.write(r.stdout); sys.stderr.write(r.stderr); sys.exit(r.returncode)')
+        r = subprocess.run([sys.executable, "-c", script, str(gone), CLI],
+                           env=self.env(), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, self.REG_SUB)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_bind_from_deleted_cwd_dies_cleanly(self):
+        gone = self.base / "gone"
+        gone.mkdir()
+        os.chdir(gone)
+        os.rmdir(gone)
+        for args in (("bind", "acme"), ("bind",), ("unbind",)):
+            code, out = self.run_cli(*args)
+            self.assertEqual(code, 1, args)
+            self.assertIn("cloudctx: error:", out)
+
+    def test_find_binding_untraversable_ancestor(self):
+        if os.geteuid() == 0:
+            self.skipTest("root traverses anything")
+        (self.base / ".cloudctx").write_text('context = "acme"\n')
+        locked = self.base / "locked"
+        (locked / "inner").mkdir(parents=True)
+        os.chmod(locked, 0)
+        self.addCleanup(os.chmod, locked, 0o700)
+        self.assertEqual(self.cc.find_binding(locked / "inner"), self.base / ".cloudctx")
+
+    # 2. control characters in paths
+    def test_controls_in_binding_path_are_stripped(self):
+        evil = self.base / "x\x1b]0;x\x07y"
+        evil.mkdir()
+        (evil / ".cloudctx").write_text('context = "acme"\n')
+        r = subprocess.run([CLI, "_env", "--binding", str(evil / ".cloudctx")],
+                           env=self.env(), capture_output=True, text=True)
+        self.assertIn("untrusted", r.stderr)
+        r2 = subprocess.run([CLI, "exec", "acme", "--", "true"], cwd=str(evil),
+                            env=self.env(), capture_output=True, text=True)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("untrusted", r2.stderr)
+        for err in (r.stderr, r2.stderr):
+            self.assertNotIn("\x1b", err)
+            self.assertNotIn("\x07", err)
+        os.chdir(evil)
+        code, out = self.run_cli("bind", "acme")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\x07", out)
+
+    # 3. untrusted hint keeps the subscription
+    def test_untrusted_hint_includes_subscription(self):
+        (self.base / ".cloudctx").write_text(
+            f'context = "acme"\nsubscription = "{self.PIN}"\n')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(self.cc.load_binding_for(self.base))
+        self.assertIn(f"run 'cloudctx bind acme --subscription {self.PIN}' in that "
+                      "folder to trust it", err.getvalue())
+
+    def test_untrusted_hint_without_subscription(self):
+        (self.base / ".cloudctx").write_text('context = "acme"\n')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.cc.load_binding_for(self.base)
+        self.assertIn("run 'cloudctx bind acme' in that folder to trust it",
+                      err.getvalue())
+
+    # 4. note outside a git repo
+    def test_bind_outside_git_notes(self):
+        os.chdir(self.base)
+        with unittest.mock.patch.object(self.cc, "binding_target",
+                                        lambda cwd: (cwd, None)):
+            code, out = self.run_cli("bind", "acme")
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"cloudctx: note: {self.base} is not in a git repo; this "
+                      "binding applies to every folder below it", out)
+
+    def test_bind_in_git_repo_no_note(self):
+        if not shutil.which("git"):
+            self.skipTest("git not installed")
+        git_cmd(self.base, "init", "-q")
+        os.chdir(self.base)
+        code, out = self.run_cli("bind", "acme")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("not in a git repo", out)
+
+    # 5. trust file pruning
+    def test_trust_file_prunes_missing_folders(self):
+        dirs = {}
+        for n in "abc":
+            dirs[n] = self.base / n
+            dirs[n].mkdir()
+        for n in "ab":
+            os.chdir(dirs[n])
+            self.assertEqual(self.run_cli("bind", "acme")[0], 0)
+        os.chdir(self.base)
+        shutil.rmtree(str(dirs["a"]))
+        os.chdir(dirs["c"])
+        self.assertEqual(self.run_cli("bind", "acme")[0], 0)
+        keys = set(self.cc.load_trusted())
+        self.assertNotIn(str(dirs["a"] / ".cloudctx"), keys)
+        self.assertIn(str(dirs["b"] / ".cloudctx"), keys)
+        self.assertIn(str(dirs["c"] / ".cloudctx"), keys)
