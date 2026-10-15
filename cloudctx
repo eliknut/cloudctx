@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 ESC = "\x1b"
 BEL = "\x07"

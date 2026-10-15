@@ -80,6 +80,10 @@ cloudctx show acme         # full registry entry + store paths
 cloudctx status            # the REAL identity here: az account show + aws sts
 cloudctx login acme        # re-authenticate; verifies the landed tenant matches
 cloudctx exec acme -- terraform plan   # run one command in a context; shell unchanged
+cloudctx bind acme --subscription <guid>  # bind this git worktree (or folder) to acme;
+                                          #   new shells started here pick it up
+cloudctx bind              # show the binding that applies here, or `no binding`
+cloudctx unbind            # remove this worktree's .cloudctx
 cloudctx open acme --cd ~/proj --claude  # new scoped iTerm2 window, cd, run claude
 cloudctx claude acme ~/proj              # shorthand for the above
 cloudctx clear             # unset the vars + reset the window decoration
@@ -113,6 +117,34 @@ Claude Code inherits the shell environment at launch and passes it to every
 subprocess, so any `az`/`aws`/Terraform it runs uses the context's isolated
 config automatically. **Only start Claude Code from a scoped shell** (after
 `cloudctx use`) or via `cloudctx claude <name> <path>`.
+
+## Using cloudctx in Orca
+
+[Orca](https://www.onorca.dev/) runs each task in its own git worktree, and every
+terminal there starts a login shell that sources the cloudctx shim. A `.cloudctx`
+file at the worktree root (written by `cloudctx bind`, kept out of git through
+`.git/info/exclude`) makes that shell start in the bound context, with the
+subscription pin in `ARM_SUBSCRIPTION_ID`.
+
+- Bind once per worktree: `cloudctx bind <name> [--subscription <guid>]` in the
+  worktree's first terminal; terminals opened after that pick it up. Terminals
+  that were already open keep their old environment (Orca freezes each
+  terminal's env when it spawns).
+- Only a `.cloudctx` that `cloudctx bind` created in that folder applies. A file
+  written by hand, committed to a repo, copied, symlinked or edited is ignored
+  with a one-line warning, so a file in a repo can never switch your context.
+  Run `cloudctx bind` again after moving a worktree, re-creating its folder or
+  changing a context's tenant.
+- Orca's default Claude command is `claude --dangerously-skip-permissions`,
+  which turns off every permission prompt. Set the Claude agent command to
+  plain `claude` under Settings, Agents, so approval rules still apply.
+- Use terminal agents. Orca's experimental Chat view starts agents without a
+  shell, from a cached environment that does not depend on the folder, so it
+  never sees the binding.
+
+`cloudctx bind` with no arguments shows what the current folder is bound to;
+`cloudctx unbind` removes the file. A `cd` never switches context: the binding
+applies when a shell starts, and `cloudctx use <name>` still wins afterwards.
 
 ## Agent skill
 
