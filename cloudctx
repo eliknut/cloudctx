@@ -11,6 +11,7 @@ decorate emission, commands, argparse dispatch.
 """
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -406,6 +407,78 @@ def read_binding(path: Path) -> dict:
     return {"context": context, "subscription": subscription}
 
 
+# Trust: only a binding that `cloudctx bind` wrote is used. bind records the
+# file's location and a sha256 of its bytes; a file missing from the record,
+# changed since, or a symlink is ignored (a cloned repo cannot switch a shell).
+def trust_path() -> Path:
+    return REGISTRY_ROOT() / "trusted-bindings.json"
+
+
+def binding_key(path: Path) -> str:
+    """Folder resolved, the file itself not followed."""
+    return str(Path(path).parent.resolve() / BINDING_FILE)
+
+
+def binding_digest(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def load_trusted() -> dict:
+    """{key: digest}; missing, unreadable or corrupt file -> {}."""
+    try:
+        data = json.loads(trust_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
+        return {}
+    return data
+
+
+def _save_trusted(data: dict) -> None:
+    root = REGISTRY_ROOT()
+    root.mkdir(parents=True, exist_ok=True)
+    _chmod(root, 0o700)
+    fd, tmp = tempfile.mkstemp(dir=str(root), prefix="trusted-bindings.",
+                               suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, sort_keys=True, indent=2)
+            f.write("\n")
+        os.replace(tmp, trust_path())
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def trust_binding(path: Path) -> None:
+    data = load_trusted()
+    data[binding_key(path)] = binding_digest(path)
+    _save_trusted(data)
+
+
+def untrust_binding(path: Path) -> None:
+    data = load_trusted()
+    if data.pop(binding_key(path), None) is not None:
+        _save_trusted(data)
+
+
+def is_trusted(path: Path) -> bool:
+    path = Path(path)
+    if path.is_symlink():
+        return False
+    try:
+        digest = binding_digest(path)
+    except OSError:
+        return False
+    return load_trusted().get(binding_key(path)) == digest
+
+
 def load_binding_file(path: Path) -> Optional[Tuple[Path, dict]]:
     """read_binding plus a registry check. Unusable: one stderr line, None."""
     try:
@@ -416,6 +489,11 @@ def load_binding_file(path: Path) -> Optional[Tuple[Path, dict]]:
     if binding["context"] not in load_registry():
         print(f"cloudctx: warning: ignoring binding {path}: unknown context "
               f"{binding['context']!r}", file=sys.stderr)
+        return None
+    if not is_trusted(Path(path)):
+        print(f"cloudctx: warning: ignoring untrusted binding {path}; run "
+              f"'cloudctx bind {binding['context']}' in that folder to trust it",
+              file=sys.stderr)
         return None
     return Path(path), binding
 
@@ -538,6 +616,10 @@ def cmd_bind(args) -> int:
         path = write_binding(folder, args.name, sub)
     except OSError as e:
         return die(f"cannot write {folder / BINDING_FILE}: {e}")
+    try:
+        trust_binding(path)
+    except OSError as e:
+        return die(f"cannot record trust for {path} in {trust_path()}: {e}")
     if common is not None:
         try:
             ensure_excluded(common)
@@ -552,6 +634,7 @@ def cmd_bind(args) -> int:
 def cmd_unbind(args) -> int:
     folder, _ = binding_target(Path.cwd())
     path = folder / BINDING_FILE
+    untrust_binding(path)
     if not path.is_file():
         print(f"no binding at {path}")
         return 0

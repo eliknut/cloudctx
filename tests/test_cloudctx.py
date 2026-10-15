@@ -40,6 +40,12 @@ def git_cmd(cwd, *args):
         cwd=str(cwd), check=True, capture_output=True, text=True)
 
 
+def trust(cc, path):
+    """Record a hand-written binding as trusted, as `cloudctx bind` would."""
+    cc.trust_binding(Path(path))
+    return Path(path)
+
+
 def load():
     # The CLI file has no .py extension, so spec_from_file_location can't infer
     # a loader. Supply a SourceFileLoader explicitly.
@@ -311,7 +317,7 @@ class TestBindingFile(Base):
         folder.mkdir(parents=True, exist_ok=True)
         p = folder / ".cloudctx"
         p.write_text(text, encoding="utf-8")
-        return p
+        return trust(self.cc, p)
 
     def test_find_binding_nearest_wins(self):
         outer = self.write(self.root, 'context = "acme"\n')
@@ -441,6 +447,7 @@ class TestBindingEnv(Base):
     def test_env_binding_prints_pinned_lines(self):
         p = self.dir / ".cloudctx"
         p.write_text(f'context = "acme"\nsubscription = "{self.PIN}"\n')
+        trust(self.cc, p)
         code, out, err = self.run_split("_env", "--binding", str(p))
         self.assertEqual(code, 0, err)
         self.assertIn("export CLOUDCTX_CONTEXT='acme'", out)
@@ -452,6 +459,7 @@ class TestBindingEnv(Base):
         self.run_cli("new", "bare", "--azure-tenant", "t", "--no-login")
         p = self.dir / ".cloudctx"
         p.write_text('context = "bare"\n')
+        trust(self.cc, p)
         _, out, _ = self.run_split("_env", "--binding", str(p))
         self.assertIn("unset ARM_SUBSCRIPTION_ID", out)
         self.assertIn("unset AWS_PROFILE", out)
@@ -489,6 +497,7 @@ class TestBindingExec(Base):
 
     def bind(self, text):
         (self.dir / ".cloudctx").write_text(text)
+        trust(self.cc, self.dir / ".cloudctx")
 
     def exec_in(self, cwd, name):
         env = dict(os.environ)
@@ -527,6 +536,108 @@ class TestBindingExec(Base):
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout, f"C=acme S={self.REG_SUB} L={self.REG_SUB}")
         self.assertIn("ignoring binding", r.stderr)
+
+
+class TestBindingTrust(Base):
+    PIN = "99999999-8888-7777-6666-555555555555"
+    REG_SUB = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(os.chdir, os.getcwd())
+        self.run_cli("new", "acme", "--azure-tenant", "t",
+                     "--azure-subscription", self.REG_SUB, "--no-login")
+        self.run_cli("new", "globex", "--azure-tenant", "t2", "--no-login")
+        self.base = Path(tempfile.mkdtemp(prefix="cctx-trust-")).resolve()
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.a = self.base / "a"
+        self.b = self.base / "b"
+        self.a.mkdir()
+        self.b.mkdir()
+
+    def bind_in(self, folder, *args):
+        os.chdir(folder)
+        code, out = self.run_cli("bind", *args)
+        self.assertEqual(code, 0, out)
+        return folder / ".cloudctx"
+
+    def load_quiet(self, folder):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            found = self.cc.load_binding_for(folder)
+        return found, err.getvalue()
+
+    def assert_untrusted(self, folder):
+        found, err = self.load_quiet(folder)
+        self.assertIsNone(found)
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertIn("untrusted", err)
+
+    def test_bound_file_is_trusted(self):
+        if not shutil.which("git"):
+            self.skipTest("git not installed")
+        git_cmd(self.a, "init", "-q")
+        p = self.bind_in(self.a, "acme")
+        found, err = self.load_quiet(self.a)
+        self.assertEqual(found, (p, {"context": "acme", "subscription": None}))
+        self.assertEqual(err, "")
+
+    def test_hand_written_file_is_ignored(self):
+        (self.a / ".cloudctx").write_text('context = "acme"\n')
+        self.assert_untrusted(self.a)
+
+    def test_edited_file_is_ignored(self):
+        p = self.bind_in(self.a, "acme")
+        p.write_text('context = "globex"\n')
+        self.assert_untrusted(self.a)
+
+    def test_copied_file_is_ignored(self):
+        p = self.bind_in(self.a, "acme")
+        shutil.copy(str(p), str(self.b / ".cloudctx"))
+        self.assert_untrusted(self.b)
+        self.assertIsNotNone(self.load_quiet(self.a)[0])
+
+    def test_symlinked_file_is_ignored(self):
+        p = self.bind_in(self.a, "acme")
+        (self.b / ".cloudctx").symlink_to(p)
+        self.assert_untrusted(self.b)
+
+    def test_unbind_removes_trust(self):
+        p = self.bind_in(self.a, "acme")
+        text = p.read_text()
+        code, out = self.run_cli("unbind")
+        self.assertEqual(code, 0, out)
+        p.write_text(text)
+        self.assert_untrusted(self.a)
+
+    def test_trust_file_modes(self):
+        self.bind_in(self.a, "acme")
+        tp = self.cc.trust_path()
+        self.assertEqual(stat.S_IMODE(tp.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(tp.parent.stat().st_mode), 0o700)
+        self.assertEqual(list(tp.parent.glob("*.tmp")), [])
+
+    def test_corrupt_trust_file_is_empty(self):
+        tp = self.cc.trust_path()
+        tp.parent.mkdir(parents=True, exist_ok=True)
+        for text in ("{not json", "[1]", '{"k": 1}'):
+            tp.write_text(text)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(self.cc.load_trusted(), {})
+            self.assertNotIn("Traceback", err.getvalue())
+
+    def test_exec_ignores_untrusted_binding(self):
+        (self.a / ".cloudctx").write_text(
+            f'context = "acme"\nsubscription = "{self.PIN}"\n')
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        r = subprocess.run([CLI, "exec", "acme", "--", "sh", "-c",
+                            'printf %s "$ARM_SUBSCRIPTION_ID"'],
+                           cwd=str(self.a), env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, self.REG_SUB)
+        self.assertIn("untrusted", r.stderr)
 
 
 class TestDecorate(Base):

@@ -7,6 +7,7 @@ keep them hermetic (no real Azure/iTerm2 needed).
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -25,6 +26,19 @@ def base_env(home):
     env["PATH"] = f"{ROOT}:{env.get('PATH', '')}"  # find the real `cloudctx`
     env.pop("CLOUDCTX_CONTEXT", None)
     return env
+
+
+def trust(home, path):
+    """Record a hand-written binding as trusted in `home`, as `cloudctx bind` would."""
+    code = ("import importlib.util, sys\n"
+            "from importlib.machinery import SourceFileLoader\n"
+            "from pathlib import Path\n"
+            "l = SourceFileLoader('cloudctx', sys.argv[1])\n"
+            "m = importlib.util.module_from_spec(importlib.util.spec_from_loader('cloudctx', l))\n"
+            "l.exec_module(m)\n"
+            "m.trust_binding(Path(sys.argv[2]))\n")
+    subprocess.run([sys.executable, "-c", code, str(ROOT / "cloudctx"), str(path)],
+                   env=dict(os.environ, CLOUDCTX_HOME=str(home)), check=True)
 
 
 def extract(output):
@@ -340,13 +354,15 @@ class TestShimZsh(unittest.TestCase):
         echo = "print -r --" if self.shell == "zsh" else "echo"
         return f'{echo} "{MARK}$CLOUDCTX_CONTEXT|$ARM_SUBSCRIPTION_ID|$CLOUDCTX_AZURE_LABEL"'
 
-    def bound_dir(self, name="bound", text=None):
+    def bound_dir(self, name="bound", text=None, trusted=True):
         # resolve(): the shell reports the physical path (/private/var on macOS)
         d = Path(tempfile.mkdtemp(prefix="cctx-wt-")).resolve() / name
         self.addCleanup(shutil.rmtree, d.parent, ignore_errors=True)
         d.mkdir()
         (d / ".cloudctx").write_text(
             text or f'context = "acme"\nsubscription = "{self.PIN}"\n')
+        if trusted:
+            trust(self.home, d / ".cloudctx")
         (d / "sub").mkdir()
         return d
 
@@ -400,6 +416,13 @@ class TestShimZsh(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertEqual(extract(r.stdout), "||", msg=r.stderr)
         self.assertIn("ignoring binding", r.stderr)
+
+    def test_untrusted_binding_is_not_activated(self):
+        d = self.bound_dir(trusted=False)
+        r = self.run_in(d, self._show())
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(extract(r.stdout), "||", msg=r.stderr)
+        self.assertIn("untrusted", r.stderr)
 
     def test_bound_notice_strips_control_chars(self):
         d = self.bound_dir(name="w\x1b]0;pwned\x07x")
