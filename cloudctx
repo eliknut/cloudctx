@@ -11,16 +11,20 @@ decorate emission, commands, argparse dispatch.
 """
 import argparse
 import base64
+import errno
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
+from typing import Optional, Tuple
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 ESC = "\x1b"
 BEL = "\x07"
@@ -358,6 +362,421 @@ def save_registry(data: dict) -> None:
 
 
 # --------------------------------------------------------------------------
+# Worktree binding. A regular file `.cloudctx` binds the folder it sits in
+# (and everything below) to one context, optionally pinned to one subscription.
+# The nearest file walking up from a directory wins. A directory with that
+# name (the default registry root ~/.cloudctx is one) is never a binding.
+# --------------------------------------------------------------------------
+BINDING_FILE = ".cloudctx"
+
+
+class BindingError(Exception):
+    """A .cloudctx file that cannot be used."""
+
+
+def find_binding(start: Path) -> Optional[Path]:
+    """First regular file named .cloudctx from `start` up to /, or None."""
+    here = Path(start).absolute()
+    for folder in (here, *here.parents):
+        candidate = folder / BINDING_FILE
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue  # an untraversable ancestor: not a binding here
+    return None
+
+
+def _parse_binding_text(text: str, path) -> dict:
+    """Parse binding file text. Returns {"context": str, "subscription": str|None}."""
+    try:
+        if _tomllib is not None:
+            data = _tomllib.loads(text)
+        else:
+            # _parse_toml drops keys outside a [table]; give it one.
+            data = _parse_toml("[binding]\n" + text).get("binding", {})
+    except Exception as e:
+        raise BindingError(f"cannot parse {_p(path)}: {_p(e)}")
+    context = data.get("context")
+    if not isinstance(context, str) or not NAME_RE.match(context):
+        raise BindingError(f'{_p(path)} has no valid context = "<name>" line')
+    subscription = data.get("subscription")
+    if subscription is not None and (not isinstance(subscription, str)
+                                     or not GUID_RE.match(subscription)):
+        raise BindingError(f"{_p(path)}: subscription must be a GUID")
+    return {"context": context, "subscription": subscription}
+
+
+def read_binding(path: Path) -> dict:
+    """Parse a binding file. Returns {"context": str, "subscription": str|None}."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise BindingError(f"cannot read {_p(path)}: {_p(e)}")
+    return _parse_binding_text(text, path)
+
+
+def _read_nofollow(path: Path) -> Tuple[bytes, os.stat_result]:
+    """Read a file once without following a final symlink (ELOOP on a symlink).
+    The returned bytes are the ones that get both hashed and parsed."""
+    fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    return b"".join(chunks), st
+
+
+# Trust: only a binding that `cloudctx bind` wrote is used. Each record, keyed
+# by binding_key, holds the sha256 of the file's bytes, its st_dev/st_ino (a
+# re-created folder or file gets a new inode) and the context's identity at
+# bind time (a context re-created against another tenant no longer matches).
+# A file missing from the record, changed since, or a symlink is ignored, so a
+# cloned repo cannot switch a shell to one of the user's contexts.
+def trust_path() -> Path:
+    return REGISTRY_ROOT() / "trusted-bindings.json"
+
+
+def binding_key(path: Path) -> str:
+    """Folder resolved, the file itself not followed."""
+    return str(Path(path).parent.resolve() / BINDING_FILE)
+
+
+def binding_digest(path: Path) -> str:
+    return hashlib.sha256(_read_nofollow(path)[0]).hexdigest()
+
+
+IDENTITY_FIELDS = ("azure_tenant", "aws_account_id", "aws_sso_start_url")
+
+
+def context_identity(entry: dict) -> str:
+    """sha256 hex of the IDENTITY_FIELDS values (missing ones as ""), joined
+    by NUL in that order: what a context points at, not its name."""
+    joined = "\0".join(str(entry.get(k) or "") for k in IDENTITY_FIELDS)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def _valid_record(rec) -> bool:
+    return (isinstance(rec, dict)
+            and isinstance(rec.get("digest"), str)
+            and isinstance(rec.get("identity"), str)
+            and all(isinstance(rec.get(k), int) and not isinstance(rec.get(k), bool)
+                    for k in ("dev", "ino")))
+
+
+def load_trusted() -> dict:
+    """{key: record}; a missing, unreadable or corrupt file -> {}. Records
+    that are not {digest, dev, ino, identity} objects (old format too) are
+    dropped. Never raises."""
+    try:
+        data = json.loads(trust_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and _valid_record(v)}
+
+
+def _prune_trusted(data: dict) -> dict:
+    """Drop records whose folder no longer exists (removed worktrees)."""
+    def alive(key):
+        try:
+            return Path(key).parent.is_dir()
+        except OSError:
+            return True  # cannot tell: keep it
+    return {k: v for k, v in data.items() if alive(k)}
+
+
+def _save_trusted(data: dict) -> None:
+    data = _prune_trusted(data)
+    root = REGISTRY_ROOT()
+    root.mkdir(parents=True, exist_ok=True)
+    _chmod(root, 0o700)
+    fd, tmp = tempfile.mkstemp(dir=str(root), prefix="trusted-bindings.",
+                               suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, sort_keys=True, indent=2)
+            f.write("\n")
+        os.replace(tmp, trust_path())
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def trust_binding(path: Path, text: Optional[str] = None) -> None:
+    """Record path as trusted. `text` is what bind wrote; without it the file
+    is read once (no symlink follow). dev/ino come from the final path."""
+    path = Path(path)
+    data = text.encode("utf-8") if text is not None else _read_nofollow(path)[0]
+    st = os.stat(str(path), follow_symlinks=False)
+    context = _parse_binding_text(data.decode("utf-8"), path)["context"]
+    entry = load_registry().get(context, {})
+    records = load_trusted()
+    records[binding_key(path)] = {
+        "digest": hashlib.sha256(data).hexdigest(),
+        "dev": st.st_dev, "ino": st.st_ino,
+        "identity": context_identity(entry),
+    }
+    _save_trusted(records)
+
+
+def untrust_binding(path: Path) -> None:
+    data = load_trusted()
+    if data.pop(binding_key(path), None) is not None:
+        _save_trusted(data)
+
+
+def _matches_record(path: Path, data: bytes, st, context: str) -> bool:
+    rec = load_trusted().get(binding_key(path))
+    entry = load_registry().get(context)
+    return (rec is not None and entry is not None
+            and rec["digest"] == hashlib.sha256(data).hexdigest()
+            and rec["dev"] == st.st_dev and rec["ino"] == st.st_ino
+            and rec["identity"] == context_identity(entry))
+
+
+def is_trusted(path: Path) -> bool:
+    path = Path(path)
+    if path.is_symlink():
+        return False
+    try:
+        data, st = _read_nofollow(path)
+        context = _parse_binding_text(data.decode("utf-8"), path)["context"]
+    except (OSError, UnicodeDecodeError, BindingError):
+        return False
+    return _matches_record(path, data, st, context)
+
+
+def _warn_untrusted(path, context: str, subscription: Optional[str] = None) -> None:
+    hint = f"cloudctx bind {context}"
+    if subscription:
+        hint += f" --subscription {subscription}"
+    print(f"cloudctx: warning: ignoring untrusted binding {_p(path)}; run "
+          f"'{hint}' in that folder to trust it", file=sys.stderr)
+
+
+def load_binding_file(path: Path) -> Optional[Tuple[Path, dict]]:
+    """Parse, registry check and trust check on one read of the file.
+    Unusable: one stderr line, None."""
+    data = st = None
+    try:
+        data, st = _read_nofollow(path)
+    except OSError as e:
+        if e.errno != errno.ELOOP:
+            print(f"cloudctx: warning: ignoring binding: cannot read {_p(path)}: {_p(e)}",
+                  file=sys.stderr)
+            return None
+    try:
+        if data is None:      # a symlink: never trusted; parse only to name it
+            binding = read_binding(path)
+        else:
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError as e:
+                raise BindingError(f"cannot read {_p(path)}: {_p(e)}")
+            binding = _parse_binding_text(text, path)
+    except BindingError as e:
+        print(f"cloudctx: warning: ignoring binding: {_p(e)}", file=sys.stderr)
+        return None
+    if binding["context"] not in load_registry():
+        print(f"cloudctx: warning: ignoring binding {_p(path)}: unknown context "
+              f"{binding['context']!r}", file=sys.stderr)
+        return None
+    if data is None or not _matches_record(Path(path), data, st, binding["context"]):
+        _warn_untrusted(path, binding["context"], binding["subscription"])
+        return None
+    return Path(path), binding
+
+
+def load_binding_for(start: Path) -> Optional[Tuple[Path, dict]]:
+    """The usable binding that applies to `start`, or None."""
+    path = find_binding(start)
+    if path is None:
+        return None
+    return load_binding_file(path)
+
+
+_GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+
+
+def _git_in_worktree(cwd: Path, *args, timeout=10):
+    """Run git in a possibly untrusted worktree: fsmonitor off (repo config
+    cannot launch a program) and inherited location variables dropped, so git
+    looks at `cwd` and nothing else. None on timeout/missing git."""
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_VARS}
+    try:
+        return subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(cwd), *args],
+                              capture_output=True, text=True, timeout=timeout, env=env)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def binding_target(cwd: Path) -> Tuple[Path, Optional[Path]]:
+    """(folder the binding file belongs in, git common dir or None).
+    Inside a git worktree: its toplevel and the repo's shared common dir.
+    Outside git, or with no git installed: cwd and None."""
+    r = _git_in_worktree(cwd, "rev-parse", "--show-toplevel", "--git-common-dir")
+    if r is None or r.returncode != 0:
+        return cwd, None
+    lines = r.stdout.splitlines()
+    if len(lines) < 2:
+        return cwd, None
+    common = Path(lines[1])
+    if not common.is_absolute():
+        common = cwd / common  # git prints it relative to the -C directory
+    return Path(lines[0]), common.resolve()
+
+
+def binding_text(name: str, subscription: Optional[str]) -> str:
+    text = f'context = "{_escape(name)}"\n'
+    if subscription:
+        text += f'subscription = "{_escape(subscription)}"\n'
+    return text
+
+
+def write_binding(folder: Path, name: str, subscription: Optional[str]) -> Path:
+    """Write folder/.cloudctx atomically (temp file in the same dir, os.replace)."""
+    path = folder / BINDING_FILE
+    text = binding_text(name, subscription)
+    fd, tmp = tempfile.mkstemp(dir=str(folder), prefix=BINDING_FILE + ".",
+                               suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def ensure_excluded(common_dir: Path) -> None:
+    """Add .cloudctx to <common dir>/info/exclude once. The common dir is
+    shared by every worktree of the repo, so one line covers them all."""
+    info = common_dir / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    exclude = info / "exclude"
+    text = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+    if BINDING_FILE in (line.strip() for line in text.splitlines()):
+        return
+    if text and not text.endswith("\n"):
+        text += "\n"
+    exclude.write_text(text + BINDING_FILE + "\n", encoding="utf-8")
+
+
+def _cwd_or_none() -> Optional[Path]:
+    try:
+        return Path.cwd()
+    except OSError:
+        return None
+
+
+def _p(path) -> str:
+    """A path for a user-visible message: control characters dropped so a
+    crafted folder name cannot send terminal escape sequences."""
+    return _strip_controls(str(path))
+
+
+def _show_binding(cwd: Path) -> int:
+    try:
+        found = load_binding_for(cwd)
+    except OSError as e:
+        return die(f"cannot look up a binding here: {_p(e)}")
+    if found is None:
+        print("no binding")
+        return 0
+    path, binding = found
+    print(f"binding:      {_p(path)}")
+    print(f"context:      {binding['context']}")
+    print(f"subscription: {binding['subscription'] or '(registry default)'}")
+    return 0
+
+
+def cmd_bind(args) -> int:
+    cwd = _cwd_or_none()
+    if cwd is None:
+        return die("cannot read the current folder (was it deleted?)")
+    if not args.name:
+        if args.subscription:
+            return die("usage: cloudctx bind <name> [--subscription <guid>]")
+        return _show_binding(cwd)
+    registry = load_registry()
+    if args.name not in registry:
+        return die(f"unknown context {args.name!r}")
+    sub = args.subscription
+    if sub is not None:
+        if not GUID_RE.match(sub):
+            return die(f"--subscription must be a GUID, got {sub!r}")
+        if not registry[args.name].get("azure_tenant"):
+            return die(f"context {args.name!r} has no azure_tenant; "
+                       "--subscription applies to Azure contexts only")
+    folder, common = binding_target(cwd)
+    resolved = folder.resolve()
+    if resolved in (Path.home().resolve(), Path("/")):
+        return die(f"refusing to bind {_p(resolved)}: a binding there would apply "
+                   "to every shell below it")
+    if common is not None:
+        tracked = _git_in_worktree(folder, "ls-files", "--error-unmatch", "--",
+                                   BINDING_FILE)
+        if tracked is not None and tracked.returncode == 0:
+            return die(f"{_p(folder / BINDING_FILE)} is tracked by git; a committed "
+                       "binding would apply to everyone who clones the repo")
+    try:
+        path = write_binding(folder, args.name, sub)
+    except OSError as e:
+        return die(f"cannot write {_p(folder / BINDING_FILE)}: {_p(e)}")
+    try:
+        trust_binding(path, binding_text(args.name, sub))
+    except OSError as e:
+        return die(f"cannot record trust for {_p(path)} in {_p(trust_path())}: {_p(e)}")
+    if common is not None:
+        try:
+            ensure_excluded(common)
+        except OSError as e:
+            print(f"cloudctx: warning: could not update {_p(common)}/info/exclude: {_p(e)}",
+                  file=sys.stderr)
+    if common is None:
+        print(f"cloudctx: note: {_p(folder)} is not in a git repo; this binding "
+              "applies to every folder below it", file=sys.stderr)
+    print(f"bound {_p(path)} to {args.name}"
+          + (f" (subscription {sub})" if sub else ""))
+    return 0
+
+
+def cmd_unbind(args) -> int:
+    cwd = _cwd_or_none()
+    if cwd is None:
+        return die("cannot read the current folder (was it deleted?)")
+    folder, _ = binding_target(cwd)
+    path = folder / BINDING_FILE
+    try:
+        untrust_binding(path)
+    except OSError as e:
+        return die(f"cannot update {_p(trust_path())}: {_p(e)}")
+    if not path.is_file():
+        print(f"no binding at {_p(path)}")
+        return 0
+    path.unlink()
+    print(f"removed {_p(path)}")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # Env emission — the isolation core. `_env` prints shell statements that the
 # sourced `ctx` shim eval's into the parent shell. Values are single-quote
 # escaped because the registry is untrusted input to that eval.
@@ -374,8 +793,9 @@ def shquote(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-def env_dict(name: str) -> dict:
-    """The environment a context exports, as a plain dict (shared by _env and exec)."""
+def env_dict(name: str, binding: Optional[dict] = None) -> dict:
+    """The environment a context exports, as a plain dict (shared by _env and exec).
+    A worktree binding for this context may pin the subscription."""
     entry = load_registry()[name]
     env = {
         "CLOUDCTX_CONTEXT": name,
@@ -401,11 +821,16 @@ def env_dict(name: str) -> dict:
         env["AWS_CONFIG_FILE"] = str(aws_config(name).resolve())
         env["AWS_SHARED_CREDENTIALS_FILE"] = str(aws_credentials(name).resolve())
         env["AWS_PROFILE"] = entry.get("aws_profile") or name
+    # A worktree binding's pin replaces the registry subscription in exactly
+    # these two variables (read_binding already enforced GUID shape).
+    if binding and binding.get("context") == name and binding.get("subscription"):
+        env["ARM_SUBSCRIPTION_ID"] = binding["subscription"]
+        env["CLOUDCTX_AZURE_LABEL"] = binding["subscription"]
     return env
 
 
-def env_lines(name: str) -> list:
-    env = env_dict(name)
+def env_lines(name: str, binding: Optional[dict] = None) -> list:
+    env = env_dict(name, binding)
     lines = [f"export {k}={shquote(v)}" for k, v in env.items()]
     # Explicitly unset every managed var this context does NOT set, so a single
     # eval fully *replaces* the previous context (no stale AWS_*/label bleed).
@@ -417,8 +842,17 @@ def cmd_env(args) -> int:
     if args.clear:
         print("\n".join(f"unset {var}" for var in CLEARABLE_VARS))
         return 0
+    if args.binding:
+        # Shim start-up path: an unusable binding prints nothing (the shim then
+        # leaves the shell alone) and load_binding_file has already warned.
+        loaded = load_binding_file(Path(args.binding))
+        if loaded is None:
+            return 0
+        _, binding = loaded
+        print("\n".join(env_lines(binding["context"], binding)))
+        return 0
     if not args.name:
-        return die("usage: cloudctx _env <name> | --clear")
+        return die("usage: cloudctx _env <name> | --binding <path> | --clear")
     if args.name not in load_registry():
         return die(f"unknown context {args.name!r}")
     print("\n".join(env_lines(args.name)))
@@ -475,10 +909,20 @@ def _tabcolor_seq(hex6: str) -> str:
     return f"{ESC}]1337;SetColors=tab={hex6}{BEL}"
 
 
+def _is_iterm() -> bool:
+    """OSC 1337 (badge, tab colour) is iTerm2-only; other terminals (Orca,
+    VS Code, Terminal.app) may print it as garbage, so gate it."""
+    return (os.environ.get("TERM_PROGRAM") == "iTerm.app"
+            or os.environ.get("LC_TERMINAL") == "iTerm2")
+
+
 def decorate_bytes(name: str) -> str:
     entry = load_registry()[name]
     display = entry.get("display") or name
-    out = _badge_seq(display) + _title_seq(display)
+    out = _title_seq(display)  # OSC 0: every terminal
+    if not _is_iterm():
+        return out
+    out = _badge_seq(display) + out
     color = entry.get("color")
     if color:
         try:
@@ -489,6 +933,8 @@ def decorate_bytes(name: str) -> str:
 
 
 def decorate_clear() -> str:
+    if not _is_iterm():
+        return ""
     return (f"{ESC}]1337;SetBadgeFormat={BEL}"          # empty badge payload
             f"{ESC}]1337;SetColors=tab=default{BEL}")    # documented reset
 
@@ -593,7 +1039,19 @@ def cmd_exec(args) -> int:
     # Strip any managed vars inherited from the caller's shell before overlaying
     # this context's, so exec is fail-closed (no other context's AWS_* leaks in).
     env = {k: v for k, v in os.environ.items() if k not in CLEARABLE_VARS}
-    env.update(env_dict(name))
+    binding = None
+    try:
+        found = load_binding_for(Path.cwd())
+    except OSError:
+        found = None  # deleted or unreadable cwd: run as without a binding
+    if found is not None:
+        _, bound = found
+        if bound["context"] == name:
+            binding = bound
+        else:
+            print(f"cloudctx: note: this folder is bound to {bound['context']}",
+                  file=sys.stderr)
+    env.update(env_dict(name, binding))
     try:
         return subprocess.run(cmd, env=env).returncode
     except FileNotFoundError:
@@ -1011,6 +1469,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_show.add_argument("name")
     p_show.set_defaults(func=cmd_show)
 
+    p_bind = sub.add_parser("bind", help="bind this worktree (or folder) to a context; "
+                                         "no arguments: show the binding here")
+    p_bind.add_argument("name", nargs="?")
+    p_bind.add_argument("--subscription", metavar="GUID",
+                        help="pin this subscription for the worktree")
+    p_bind.set_defaults(func=cmd_bind)
+
+    p_unbind = sub.add_parser("unbind", help="remove this worktree's .cloudctx binding")
+    p_unbind.set_defaults(func=cmd_unbind)
+
     p_names = sub.add_parser("_names", help="(internal) bare context names, for completion")
     p_names.set_defaults(func=cmd_names)
 
@@ -1056,6 +1524,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_env = sub.add_parser("_env", help="(internal) emit shell export/unset lines")
     p_env.add_argument("name", nargs="?")
     p_env.add_argument("--clear", action="store_true")
+    p_env.add_argument("--binding", metavar="PATH",
+                       help="emit the env of the context bound by this .cloudctx file")
     p_env.set_defaults(func=cmd_env)
 
     p_dec = sub.add_parser("_decorate", help="(internal) emit iTerm2 escape sequences")

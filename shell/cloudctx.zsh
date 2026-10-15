@@ -71,12 +71,12 @@ add-zsh-hook preexec cloudctx_preexec
 _cloudctx() {
   local -a subcmds names
   subcmds=(use clear new list show delete status login exec open claude
-           gen-profiles install self-update)
+           bind unbind gen-profiles install self-update)
   if (( CURRENT == 2 )); then
     compadd -- $subcmds
   elif (( CURRENT == 3 )); then
     case "${words[2]}" in
-      use|login|exec|open|claude|delete|show)
+      use|login|exec|open|claude|delete|show|bind)
         names=(${(f)"$(command cloudctx _names 2>/dev/null)"})
         compadd -- $names
         ;;
@@ -93,4 +93,44 @@ fi
 # `%` in the (free-form) values is doubled so it is rendered literally and can
 # never act as a prompt escape.
 setopt PROMPT_SUBST
-PROMPT='${CLOUDCTX_CONTEXT:+%F{cyan}[${CLOUDCTX_CONTEXT//\%/%%}${CLOUDCTX_AZURE_LABEL:+:${CLOUDCTX_AZURE_LABEL//\%/%%}}${AWS_PROFILE:+ aws:${AWS_PROFILE//\%/%%}}]%f }'"$PROMPT"
+# %6F is cyan in numeric form: a braced %F{cyan} would close the enclosing
+# ${CLOUDCTX_CONTEXT:+...} at its first `}` and break the whole segment.
+PROMPT='${CLOUDCTX_CONTEXT:+%6F[${CLOUDCTX_CONTEXT//\%/%%}${CLOUDCTX_AZURE_LABEL:+:${CLOUDCTX_AZURE_LABEL//\%/%%}}${AWS_PROFILE:+ aws:${AWS_PROFILE//\%/%%}}]%f }'"$PROMPT"
+
+# --- worktree binding (runs once, now) -------------------------------------
+# Walk up from $PWD in pure shell for a regular file named .cloudctx (a
+# directory with that name, like the registry root ~/.cloudctx, never counts).
+# Only when one exists does the binary run, so an unbound shell pays nothing.
+# Nothing hooks chpwd/precmd: a binding applies at shell start only.
+_cloudctx_find_binding() {
+  emulate -L zsh
+  local d=$PWD
+  typeset -g _cloudctx_binding=
+  while :; do
+    if [[ -f "${d%/}/.cloudctx" ]]; then
+      _cloudctx_binding="${d%/}/.cloudctx"
+      return 0
+    fi
+    [[ -z "$d" || "$d" == / ]] && return 1
+    d=${d%/*}
+    [[ -n "$d" ]] || d=/
+  done
+}
+
+_cloudctx_apply_binding() {
+  emulate -L zsh
+  _cloudctx_find_binding || return 0
+  local _cloudctx_env
+  _cloudctx_env="$(command cloudctx _env --binding "$_cloudctx_binding")" || return 0
+  [[ -n "$_cloudctx_env" ]] || return 0
+  eval "$_cloudctx_env"
+  # Title escapes only to a terminal: rc files sourced with captured stdout
+  # (environment probes, shell snapshots) must not get escape bytes.
+  [[ -t 1 ]] && command cloudctx _decorate "$CLOUDCTX_CONTEXT"
+  if [[ -o interactive ]]; then
+    # Control characters in a folder name must never reach the terminal.
+    local _n=${CLOUDCTX_CONTEXT//[[:cntrl:]]/?} _p=${_cloudctx_binding//[[:cntrl:]]/?}
+    printf '%s\n' "cloudctx: $_n (bound by $_p)" >&2
+  fi
+}
+_cloudctx_apply_binding

@@ -58,6 +58,21 @@ If it reports no contexts, none exist yet — see "When no context exists".
    context: `cloudctx exec <context> -- cloudctx status`, checked against the `azure_tenant`
    in `cloudctx show <context>`.
 
+## Bound worktrees
+
+A worktree can carry a `.cloudctx` binding; a shell started there is already scoped,
+possibly to one pinned subscription.
+
+- When `$CLOUDCTX_CONTEXT` is set at session start, it is the scope; do not switch away
+  from it without asking.
+- Pass `--subscription "$ARM_SUBSCRIPTION_ID"` on every `az` call that accepts it
+  whenever `ARM_SUBSCRIPTION_ID` is set.
+- Never run `az account set` in a bound worktree: it changes the default for every other
+  worktree on the same context.
+- `cloudctx bind` with no arguments shows what the folder is bound to.
+- Never create or edit a `.cloudctx` file by hand: only a file written by `cloudctx bind`
+  in that folder applies, so `cloudctx bind` is the only way to bind.
+
 ## When no context exists
 
 If no context matches, STOP — do NOT fall back to bare `az`. Ask the user, then offer to

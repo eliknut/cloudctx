@@ -97,10 +97,10 @@ fi
 _cloudctx_complete() {
   local cur=${COMP_WORDS[COMP_CWORD]}
   if [ "$COMP_CWORD" -eq 1 ]; then
-    COMPREPLY=($(compgen -W "use clear new list show delete status login exec open claude gen-profiles install self-update" -- "$cur"))
+    COMPREPLY=($(compgen -W "use clear new list show delete status login exec open claude bind unbind gen-profiles install self-update" -- "$cur"))
   elif [ "$COMP_CWORD" -eq 2 ]; then
     case "${COMP_WORDS[1]}" in
-      use|login|exec|open|claude|delete|show)
+      use|login|exec|open|claude|delete|show|bind)
         COMPREPLY=($(compgen -W "$(command cloudctx _names 2>/dev/null)" -- "$cur"))
         ;;
     esac
@@ -111,3 +111,39 @@ complete -F _cloudctx_complete cloudctx
 # Show the active context (+ short Azure subscription label + AWS_PROFILE) in
 # the prompt. AWS_PROFILE is the only cloud indicator for an AWS-only context.
 PS1='${CLOUDCTX_CONTEXT:+\[\e[36m\][${CLOUDCTX_CONTEXT}${CLOUDCTX_AZURE_LABEL:+:${CLOUDCTX_AZURE_LABEL}}${AWS_PROFILE:+ aws:${AWS_PROFILE}}]\[\e[0m\] }'"$PS1"
+
+# --- worktree binding (runs once, now) -------------------------------------
+# Walk up from $PWD in pure shell for a regular file named .cloudctx (a
+# directory with that name, like the registry root ~/.cloudctx, never counts).
+# Only when one exists does the binary run, so an unbound shell pays nothing.
+# Nothing is added to PROMPT_COMMAND: a binding applies at shell start only.
+_cloudctx_find_binding() {
+  local d=$PWD
+  _cloudctx_binding=
+  while :; do
+    if [[ -f "${d%/}/.cloudctx" ]]; then
+      _cloudctx_binding="${d%/}/.cloudctx"
+      return 0
+    fi
+    [[ -z "$d" || "$d" == / ]] && return 1
+    d=${d%/*}
+    [[ -n "$d" ]] || d=/
+  done
+}
+
+_cloudctx_apply_binding() {
+  _cloudctx_find_binding || return 0
+  local _cloudctx_env
+  _cloudctx_env="$(command cloudctx _env --binding "$_cloudctx_binding")" || return 0
+  [ -n "$_cloudctx_env" ] || return 0
+  eval "$_cloudctx_env"
+  # Title escapes only to a terminal: rc files sourced with captured stdout
+  # (environment probes, shell snapshots) must not get escape bytes.
+  [[ -t 1 ]] && command cloudctx _decorate "$CLOUDCTX_CONTEXT"
+  if [[ $- == *i* ]]; then
+    # Control characters in a folder name must never reach the terminal.
+    local _n=${CLOUDCTX_CONTEXT//[[:cntrl:]]/?} _p=${_cloudctx_binding//[[:cntrl:]]/?}
+    printf '%s\n' "cloudctx: $_n (bound by $_p)" >&2
+  fi
+}
+_cloudctx_apply_binding
