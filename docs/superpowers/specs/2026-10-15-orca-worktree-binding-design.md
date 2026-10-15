@@ -21,6 +21,9 @@ working directory, and the agent command runs only after the rc files
 (`src/main/providers/local-pty-launch-plan.ts`,
 `src/main/pty/posix-shell-startup-command.ts`). The cloudctx shim is sourced
 from the rc file, so the shell start is where the binding takes effect.
+Confirmed on Elias's Mac with Orca 1.4.224 (2026-10-15): an Orca terminal
+reports `TERM_PROGRAM=Orca`, `$0` = `-/bin/zsh` (login shell), and `cloudctx`
+is the shim function from `~/.local/share/cloudctx/shell/cloudctx.zsh`.
 
 Success, observed by hand in Orca: two worktrees of one repo, bound to two
 different contexts. In each, a new terminal's prompt shows its own context, and
@@ -113,6 +116,16 @@ runs once, when the shim is sourced:
    `cloudctx: <name> (bound by <path>)`.
 
 Nothing is added to `chpwd`, `precmd` or `PROMPT_COMMAND`.
+
+**Bug fix, zsh prompt segment.** The segment in `shell/cloudctx.zsh` has been
+broken in every terminal: the `}` of `%F{cyan}` closes the surrounding
+`${CLOUDCTX_CONTEXT:+...}` early. With no context the prompt shows `[] }`
+(seen in Orca 2026-10-15, reproduced under `zsh -f`, zsh 5.9); with a context
+the name is dropped and only the colour code is left. The existing tests assert
+the `PROMPT` string, not its rendered output, so they pass. Fix the segment so
+no context renders nothing and a context renders `[name:label aws:profile] `,
+and add tests that render it (`print -rP`). The bash segment uses `\[\e[36m\]`
+without nested braces and is not affected.
 
 `_decorate` sends the iTerm2-only OSC 1337 sequences (badge, tab colour) only
 when `TERM_PROGRAM=iTerm.app` or `LC_TERMINAL=iTerm2`. The OSC 0 title is
