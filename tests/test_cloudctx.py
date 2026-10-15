@@ -1237,7 +1237,38 @@ class TestBind(Base):
         self.assertEqual((self.repo / ".cloudctx").read_text(),
                          f'context = "acme"\nsubscription = "{self.PIN}"\n')
         self.assertFalse((self.repo / "a" / "b" / ".cloudctx").exists())
-        self.assertEqual(list(self.repo.glob(".cloudctx.tmp")), [])
+        self.assertEqual(list(self.repo.glob(".cloudctx.*tmp")), [])
+
+    def test_bind_does_not_follow_planted_tmp_symlink(self):
+        victim = self.repo / "victim.txt"
+        victim.write_text("original\n")
+        (self.repo / ".cloudctx.tmp").symlink_to(victim)
+        code, out = self.run_cli("bind", "acme")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(victim.read_text(), "original\n")
+        self.assertEqual((self.repo / ".cloudctx").read_text(), 'context = "acme"\n')
+
+    def test_bind_ignores_repo_fsmonitor(self):
+        marker = self.base / "fsmonitor-ran"
+        hook = write_stub(self.base, "fsmon", f'touch "{marker}"\n')
+        (self.repo / "f").write_text("x")
+        git_cmd(self.repo, "add", "f")
+        git_cmd(self.repo, "config", "core.fsmonitor", str(hook))
+        code, out = self.run_cli("bind", "acme")
+        self.assertEqual(code, 0, out)
+        self.assertFalse(marker.exists())
+
+    def test_bind_ignores_inherited_git_dir(self):
+        other = self.base / "other"
+        other.mkdir()
+        git_cmd(other, "init", "-q")
+        os.environ["GIT_DIR"] = str(other / ".git")
+        code, out = self.run_cli("bind", "acme")
+        self.assertEqual(code, 0, out)
+        self.assertTrue((self.repo / ".cloudctx").is_file())
+        self.assertFalse((other / ".cloudctx").exists())
+        self.assertIn(".cloudctx", self.exclude_lines(self.repo / ".git"))
+        self.assertNotIn(".cloudctx", self.exclude_lines(other / ".git"))
 
     def test_bind_without_subscription(self):
         code, _ = self.run_cli("bind", "acme")

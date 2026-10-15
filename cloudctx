@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -427,11 +428,26 @@ def load_binding_for(start: Path) -> Optional[Tuple[Path, dict]]:
     return load_binding_file(path)
 
 
+_GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+
+
+def _git_in_worktree(cwd: Path, *args, timeout=10):
+    """Run git in a possibly untrusted worktree: fsmonitor off (repo config
+    cannot launch a program) and inherited location variables dropped, so git
+    looks at `cwd` and nothing else. None on timeout/missing git."""
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_VARS}
+    try:
+        return subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(cwd), *args],
+                              capture_output=True, text=True, timeout=timeout, env=env)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
 def binding_target(cwd: Path) -> Tuple[Path, Optional[Path]]:
     """(folder the binding file belongs in, git common dir or None).
     Inside a git worktree: its toplevel and the repo's shared common dir.
     Outside git, or with no git installed: cwd and None."""
-    r = _git(cwd, "rev-parse", "--show-toplevel", "--git-common-dir", timeout=10)
+    r = _git_in_worktree(cwd, "rev-parse", "--show-toplevel", "--git-common-dir")
     if r is None or r.returncode != 0:
         return cwd, None
     lines = r.stdout.splitlines()
@@ -449,12 +465,18 @@ def write_binding(folder: Path, name: str, subscription: Optional[str]) -> Path:
     text = f'context = "{_escape(name)}"\n'
     if subscription:
         text += f'subscription = "{_escape(subscription)}"\n'
-    tmp = folder / (BINDING_FILE + ".tmp")
+    fd, tmp = tempfile.mkstemp(dir=str(folder), prefix=BINDING_FILE + ".",
+                               suffix=".tmp")
     try:
-        tmp.write_text(text, encoding="utf-8")
+        os.fchmod(fd, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
         os.replace(tmp, path)
-    except OSError:
-        tmp.unlink(missing_ok=True)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
         raise
     return path
 
@@ -507,8 +529,8 @@ def cmd_bind(args) -> int:
         return die(f"refusing to bind {resolved}: a binding there would apply "
                    "to every shell below it")
     if common is not None:
-        tracked = _git(folder, "ls-files", "--error-unmatch", "--", BINDING_FILE,
-                       timeout=10)
+        tracked = _git_in_worktree(folder, "ls-files", "--error-unmatch", "--",
+                                   BINDING_FILE)
         if tracked is not None and tracked.returncode == 0:
             return die(f"{folder / BINDING_FILE} is tracked by git; a committed "
                        "binding would apply to everyone who clones the repo")
