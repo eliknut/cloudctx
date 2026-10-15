@@ -463,6 +463,64 @@ class TestBindingEnv(Base):
         self.assertIn("ignoring binding", err)
 
 
+class TestBindingExec(Base):
+    REG_SUB = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    GLOBEX_SUB = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+    PIN = "99999999-8888-7777-6666-555555555555"
+    SHOW = 'printf "C=%s S=%s L=%s" "$CLOUDCTX_CONTEXT" "$ARM_SUBSCRIPTION_ID" "$CLOUDCTX_AZURE_LABEL"'
+
+    def setUp(self):
+        super().setUp()
+        self.run_cli("new", "acme", "--azure-tenant", "t",
+                     "--azure-subscription", self.REG_SUB, "--no-login")
+        self.run_cli("new", "globex", "--azure-tenant", "t2",
+                     "--azure-subscription", self.GLOBEX_SUB, "--no-login")
+        self.dir = Path(tempfile.mkdtemp(prefix="cctx-exec-")).resolve()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        (self.dir / "sub").mkdir()
+
+    def bind(self, text):
+        (self.dir / ".cloudctx").write_text(text)
+
+    def exec_in(self, cwd, name):
+        env = dict(os.environ)
+        env["CLOUDCTX_HOME"] = self.tmp
+        env["ARM_SUBSCRIPTION_ID"] = "stale-inherited"
+        return subprocess.run([CLI, "exec", name, "--", "sh", "-c", self.SHOW],
+                              cwd=str(cwd), env=env, capture_output=True, text=True)
+
+    def test_same_context_applies_pin(self):
+        self.bind(f'context = "acme"\nsubscription = "{self.PIN}"\n')
+        r = self.exec_in(self.dir / "sub", "acme")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, f"C=acme S={self.PIN} L={self.PIN}")
+        self.assertNotIn("note:", r.stderr)
+
+    def test_same_context_without_pin_uses_registry(self):
+        self.bind('context = "acme"\n')
+        r = self.exec_in(self.dir, "acme")
+        self.assertEqual(r.stdout, f"C=acme S={self.REG_SUB} L={self.REG_SUB}")
+
+    def test_other_context_runs_unpinned_with_note(self):
+        self.bind(f'context = "acme"\nsubscription = "{self.PIN}"\n')
+        r = self.exec_in(self.dir, "globex")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, f"C=globex S={self.GLOBEX_SUB} L={self.GLOBEX_SUB}")
+        self.assertIn("cloudctx: note: this folder is bound to acme\n", r.stderr)
+
+    def test_no_binding_unchanged(self):
+        r = self.exec_in(self.dir, "acme")
+        self.assertEqual(r.stdout, f"C=acme S={self.REG_SUB} L={self.REG_SUB}")
+        self.assertEqual(r.stderr, "")
+
+    def test_broken_binding_warns_and_runs_unpinned(self):
+        self.bind('context = "nope"\n')
+        r = self.exec_in(self.dir, "acme")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, f"C=acme S={self.REG_SUB} L={self.REG_SUB}")
+        self.assertIn("ignoring binding", r.stderr)
+
+
 class TestDecorate(Base):
     def setUp(self):
         super().setUp()

@@ -690,7 +690,16 @@ def cmd_exec(args) -> int:
     # Strip any managed vars inherited from the caller's shell before overlaying
     # this context's, so exec is fail-closed (no other context's AWS_* leaks in).
     env = {k: v for k, v in os.environ.items() if k not in CLEARABLE_VARS}
-    env.update(env_dict(name))
+    binding = None
+    found = load_binding_for(Path.cwd())
+    if found is not None:
+        _, bound = found
+        if bound["context"] == name:
+            binding = bound
+        else:
+            print(f"cloudctx: note: this folder is bound to {bound['context']}",
+                  file=sys.stderr)
+    env.update(env_dict(name, binding))
     try:
         return subprocess.run(cmd, env=env).returncode
     except FileNotFoundError:
