@@ -71,12 +71,12 @@ add-zsh-hook preexec cloudctx_preexec
 _cloudctx() {
   local -a subcmds names
   subcmds=(use clear new list show delete status login exec open claude
-           gen-profiles install self-update)
+           bind unbind gen-profiles install self-update)
   if (( CURRENT == 2 )); then
     compadd -- $subcmds
   elif (( CURRENT == 3 )); then
     case "${words[2]}" in
-      use|login|exec|open|claude|delete|show)
+      use|login|exec|open|claude|delete|show|bind)
         names=(${(f)"$(command cloudctx _names 2>/dev/null)"})
         compadd -- $names
         ;;

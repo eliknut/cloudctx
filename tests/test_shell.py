@@ -307,6 +307,24 @@ class TestShimZsh(unittest.TestCase):
                            env=self.env, capture_output=True, text=True)
         self.assertIn("cloudctx_debug", extract(r.stdout) or "", msg=r.stderr)
 
+    def test_bash_completion_offers_bind(self):
+        if self.shell != "bash":
+            self.skipTest("bash completion internals")
+        script = (
+            f"source {ROOT}/shell/cloudctx.bash\n"
+            'COMP_WORDS=(cloudctx bi); COMP_CWORD=1\n'
+            "_cloudctx_complete\n"
+            'echo "CCTX=${COMPREPLY[*]}"\n'
+            'COMP_WORDS=(cloudctx bind ""); COMP_CWORD=2\n'
+            "_cloudctx_complete\n"
+            'echo "CCTX=${COMPREPLY[*]}"\n'
+        )
+        r = subprocess.run(["bash", "--norc", "--noprofile", "-c", script],
+                           cwd=self.home, env=self.env, capture_output=True, text=True)
+        lines = [l for l in r.stdout.splitlines() if l.startswith(MARK)]
+        self.assertEqual(lines[0], f"{MARK}bind", msg=r.stderr)
+        self.assertIn("acme", lines[1])
+
 
 @unittest.skipUnless(shutil.which("bash"), "bash not installed")
 class TestShimBash(TestShimZsh):

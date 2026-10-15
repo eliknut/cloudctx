@@ -32,6 +32,14 @@ def write_stub(directory, name, body):
     return p
 
 
+def git_cmd(cwd, *args):
+    """Run git hermetically (no signing, fixed identity) in `cwd`."""
+    return subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+         "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", *args],
+        cwd=str(cwd), check=True, capture_output=True, text=True)
+
+
 def load():
     # The CLI file has no .py extension, so spec_from_file_location can't infer
     # a loader. Supply a SourceFileLoader explicitly.
@@ -1199,6 +1207,176 @@ class TestDelete(Base):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, msg=r.stderr)
         self.assertIn("active in this shell", r.stderr)
+
+
+@unittest.skipUnless(shutil.which("git"), "git not installed")
+class TestBind(Base):
+    PIN = "99999999-8888-7777-6666-555555555555"
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(os.chdir, os.getcwd())
+        self.run_cli("new", "acme", "--azure-tenant", "t", "--no-login")
+        self.run_cli("new", "awsonly", "--aws-profile", "p", "--no-login")
+        self.base = Path(tempfile.mkdtemp(prefix="cctx-repo-")).resolve()
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.repo = self.base / "repo"
+        self.repo.mkdir()
+        git_cmd(self.repo, "init", "-q")
+        os.chdir(self.repo)
+
+    def exclude_lines(self, common):
+        p = common / "info" / "exclude"
+        return p.read_text().splitlines() if p.exists() else []
+
+    def test_bind_writes_file_at_toplevel(self):
+        (self.repo / "a" / "b").mkdir(parents=True)
+        os.chdir(self.repo / "a" / "b")
+        code, out = self.run_cli("bind", "acme", "--subscription", self.PIN)
+        self.assertEqual(code, 0, out)
+        self.assertEqual((self.repo / ".cloudctx").read_text(),
+                         f'context = "acme"\nsubscription = "{self.PIN}"\n')
+        self.assertFalse((self.repo / "a" / "b" / ".cloudctx").exists())
+        self.assertEqual(list(self.repo.glob(".cloudctx.tmp")), [])
+
+    def test_bind_without_subscription(self):
+        code, _ = self.run_cli("bind", "acme")
+        self.assertEqual(code, 0)
+        self.assertEqual((self.repo / ".cloudctx").read_text(), 'context = "acme"\n')
+
+    def test_bind_unknown_context(self):
+        code, out = self.run_cli("bind", "nope")
+        self.assertEqual(code, 1)
+        self.assertIn("unknown context", out)
+        self.assertFalse((self.repo / ".cloudctx").exists())
+
+    def test_bind_rejects_non_guid_subscription(self):
+        code, out = self.run_cli("bind", "acme", "--subscription", "Prod")
+        self.assertEqual(code, 1)
+        self.assertIn("GUID", out)
+        self.assertFalse((self.repo / ".cloudctx").exists())
+
+    def test_bind_rejects_subscription_for_aws_only(self):
+        code, out = self.run_cli("bind", "awsonly", "--subscription", self.PIN)
+        self.assertEqual(code, 1)
+        self.assertIn("azure_tenant", out)
+
+    def test_bind_adds_exclude_line_once(self):
+        self.run_cli("bind", "acme")
+        self.run_cli("bind", "acme", "--subscription", self.PIN)
+        self.assertEqual(self.exclude_lines(self.repo / ".git").count(".cloudctx"), 1)
+        status = git_cmd(self.repo, "status", "--porcelain").stdout
+        self.assertNotIn(".cloudctx", status)
+
+    def test_bind_creates_missing_info_dir(self):
+        shutil.rmtree(self.repo / ".git" / "info", ignore_errors=True)
+        code, out = self.run_cli("bind", "acme")
+        self.assertEqual(code, 0, out)
+        self.assertIn(".cloudctx", self.exclude_lines(self.repo / ".git"))
+
+    def test_bind_refuses_tracked_file(self):
+        (self.repo / ".cloudctx").write_text('context = "acme"\n')
+        git_cmd(self.repo, "add", ".cloudctx")
+        code, out = self.run_cli("bind", "acme", "--subscription", self.PIN)
+        self.assertEqual(code, 1)
+        self.assertIn("tracked", out)
+        self.assertEqual((self.repo / ".cloudctx").read_text(), 'context = "acme"\n')
+
+    def test_bind_in_linked_worktree_uses_common_exclude(self):
+        git_cmd(self.repo, "commit", "--allow-empty", "-q", "-m", "init")
+        wt = self.base / "wt"
+        git_cmd(self.repo, "worktree", "add", "-q", str(wt))
+        os.chdir(wt)
+        code, out = self.run_cli("bind", "acme")
+        self.assertEqual(code, 0, out)
+        self.assertTrue((wt / ".cloudctx").is_file())
+        self.assertFalse((self.repo / ".cloudctx").exists())
+        self.assertIn(".cloudctx", self.exclude_lines(self.repo / ".git"))
+        self.assertEqual(git_cmd(wt, "status", "--porcelain").stdout, "")
+
+    def test_bind_in_path_with_space_and_quote(self):
+        odd = self.base / "it's a repo"
+        odd.mkdir()
+        git_cmd(odd, "init", "-q")
+        os.chdir(odd)
+        code, out = self.run_cli("bind", "acme", "--subscription", self.PIN)
+        self.assertEqual(code, 0, out)
+        r = subprocess.run(
+            ["sh", "-c", 'eval "$("$0" _env --binding "$1")"; printf %s "$ARM_SUBSCRIPTION_ID"',
+             CLI, str(odd / ".cloudctx")],
+            env=dict(os.environ), capture_output=True, text=True)
+        self.assertEqual(r.stdout, self.PIN, r.stderr)
+
+    def test_bind_outside_git_writes_cwd(self):
+        plain = self.base / "plain"
+        plain.mkdir()
+        os.chdir(plain)
+        code, out = self.run_cli("bind", "acme")
+        self.assertEqual(code, 0, out)
+        self.assertTrue((plain / ".cloudctx").is_file())
+        self.assertFalse((plain / ".git").exists())
+
+    def test_bind_without_git_installed_writes_cwd(self):
+        os.environ["PATH"] = str(self.base / "empty-path")
+        code, out = self.run_cli("bind", "acme")
+        self.assertEqual(code, 0, out)
+        self.assertTrue((self.repo / ".cloudctx").is_file())
+
+    def test_bind_refuses_home(self):
+        home = self.base / "home"
+        home.mkdir()
+        os.environ["HOME"] = str(home)
+        os.chdir(home)
+        code, out = self.run_cli("bind", "acme")
+        self.assertEqual(code, 1)
+        self.assertIn("refusing", out)
+        self.assertFalse((home / ".cloudctx").exists())
+
+    def test_bind_refuses_root(self):
+        os.chdir("/")
+        code, out = self.run_cli("bind", "acme")
+        self.assertEqual(code, 1)
+        self.assertIn("refusing", out)
+
+    def test_bind_refuses_directory_named_cloudctx(self):
+        (self.repo / ".cloudctx").mkdir()
+        code, out = self.run_cli("bind", "acme")
+        self.assertEqual(code, 1)
+        self.assertIn("cannot write", out)
+
+    def test_bind_no_args_shows_binding(self):
+        self.run_cli("bind", "acme", "--subscription", self.PIN)
+        (self.repo / "deep").mkdir()
+        os.chdir(self.repo / "deep")
+        code, out = self.run_cli("bind")
+        self.assertEqual(code, 0)
+        self.assertIn(str(self.repo / ".cloudctx"), out)
+        self.assertIn("context:      acme", out)
+        self.assertIn(f"subscription: {self.PIN}", out)
+
+    def test_bind_no_args_without_binding(self):
+        code, out = self.run_cli("bind")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "no binding")
+
+    def test_bind_subscription_without_name_is_usage_error(self):
+        code, out = self.run_cli("bind", "--subscription", self.PIN)
+        self.assertEqual(code, 1)
+        self.assertIn("usage", out)
+
+    def test_unbind_removes_file_keeps_exclude(self):
+        self.run_cli("bind", "acme")
+        (self.repo / "sub").mkdir()
+        os.chdir(self.repo / "sub")
+        code, out = self.run_cli("unbind")
+        self.assertEqual(code, 0, out)
+        self.assertFalse((self.repo / ".cloudctx").exists())
+        self.assertIn(".cloudctx", self.exclude_lines(self.repo / ".git"))
+
+    def test_unbind_without_binding(self):
+        code, out = self.run_cli("unbind")
+        self.assertEqual(code, 0)
+        self.assertIn("no binding", out)
 
 
 class TestVersion(Base):

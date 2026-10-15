@@ -97,10 +97,10 @@ fi
 _cloudctx_complete() {
   local cur=${COMP_WORDS[COMP_CWORD]}
   if [ "$COMP_CWORD" -eq 1 ]; then
-    COMPREPLY=($(compgen -W "use clear new list show delete status login exec open claude gen-profiles install self-update" -- "$cur"))
+    COMPREPLY=($(compgen -W "use clear new list show delete status login exec open claude bind unbind gen-profiles install self-update" -- "$cur"))
   elif [ "$COMP_CWORD" -eq 2 ]; then
     case "${COMP_WORDS[1]}" in
-      use|login|exec|open|claude|delete|show)
+      use|login|exec|open|claude|delete|show|bind)
         COMPREPLY=($(compgen -W "$(command cloudctx _names 2>/dev/null)" -- "$cur"))
         ;;
     esac

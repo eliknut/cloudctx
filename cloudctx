@@ -427,6 +427,117 @@ def load_binding_for(start: Path) -> Optional[Tuple[Path, dict]]:
     return load_binding_file(path)
 
 
+def binding_target(cwd: Path) -> Tuple[Path, Optional[Path]]:
+    """(folder the binding file belongs in, git common dir or None).
+    Inside a git worktree: its toplevel and the repo's shared common dir.
+    Outside git, or with no git installed: cwd and None."""
+    r = _git(cwd, "rev-parse", "--show-toplevel", "--git-common-dir", timeout=10)
+    if r is None or r.returncode != 0:
+        return cwd, None
+    lines = r.stdout.splitlines()
+    if len(lines) < 2:
+        return cwd, None
+    common = Path(lines[1])
+    if not common.is_absolute():
+        common = cwd / common  # git prints it relative to the -C directory
+    return Path(lines[0]), common.resolve()
+
+
+def write_binding(folder: Path, name: str, subscription: Optional[str]) -> Path:
+    """Write folder/.cloudctx atomically (temp file in the same dir, os.replace)."""
+    path = folder / BINDING_FILE
+    text = f'context = "{_escape(name)}"\n'
+    if subscription:
+        text += f'subscription = "{_escape(subscription)}"\n'
+    tmp = folder / (BINDING_FILE + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+    return path
+
+
+def ensure_excluded(common_dir: Path) -> None:
+    """Add .cloudctx to <common dir>/info/exclude once. The common dir is
+    shared by every worktree of the repo, so one line covers them all."""
+    info = common_dir / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    exclude = info / "exclude"
+    text = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+    if BINDING_FILE in (line.strip() for line in text.splitlines()):
+        return
+    if text and not text.endswith("\n"):
+        text += "\n"
+    exclude.write_text(text + BINDING_FILE + "\n", encoding="utf-8")
+
+
+def _show_binding(cwd: Path) -> int:
+    found = load_binding_for(cwd)
+    if found is None:
+        print("no binding")
+        return 0
+    path, binding = found
+    print(f"binding:      {path}")
+    print(f"context:      {binding['context']}")
+    print(f"subscription: {binding['subscription'] or '(registry default)'}")
+    return 0
+
+
+def cmd_bind(args) -> int:
+    cwd = Path.cwd()
+    if not args.name:
+        if args.subscription:
+            return die("usage: cloudctx bind <name> [--subscription <guid>]")
+        return _show_binding(cwd)
+    registry = load_registry()
+    if args.name not in registry:
+        return die(f"unknown context {args.name!r}")
+    sub = args.subscription
+    if sub is not None:
+        if not GUID_RE.match(sub):
+            return die(f"--subscription must be a GUID, got {sub!r}")
+        if not registry[args.name].get("azure_tenant"):
+            return die(f"context {args.name!r} has no azure_tenant; "
+                       "--subscription applies to Azure contexts only")
+    folder, common = binding_target(cwd)
+    resolved = folder.resolve()
+    if resolved in (Path.home().resolve(), Path("/")):
+        return die(f"refusing to bind {resolved}: a binding there would apply "
+                   "to every shell below it")
+    if common is not None:
+        tracked = _git(folder, "ls-files", "--error-unmatch", "--", BINDING_FILE,
+                       timeout=10)
+        if tracked is not None and tracked.returncode == 0:
+            return die(f"{folder / BINDING_FILE} is tracked by git; a committed "
+                       "binding would apply to everyone who clones the repo")
+    try:
+        path = write_binding(folder, args.name, sub)
+    except OSError as e:
+        return die(f"cannot write {folder / BINDING_FILE}: {e}")
+    if common is not None:
+        try:
+            ensure_excluded(common)
+        except OSError as e:
+            print(f"cloudctx: warning: could not update {common}/info/exclude: {e}",
+                  file=sys.stderr)
+    print(f"bound {path} to {args.name}"
+          + (f" (subscription {sub})" if sub else ""))
+    return 0
+
+
+def cmd_unbind(args) -> int:
+    folder, _ = binding_target(Path.cwd())
+    path = folder / BINDING_FILE
+    if not path.is_file():
+        print(f"no binding at {path}")
+        return 0
+    path.unlink()
+    print(f"removed {path}")
+    return 0
+
+
 # --------------------------------------------------------------------------
 # Env emission — the isolation core. `_env` prints shell statements that the
 # sourced `ctx` shim eval's into the parent shell. Values are single-quote
@@ -1116,6 +1227,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_show = sub.add_parser("show", help="show a context's registry entry + store paths")
     p_show.add_argument("name")
     p_show.set_defaults(func=cmd_show)
+
+    p_bind = sub.add_parser("bind", help="bind this worktree (or folder) to a context; "
+                                         "no arguments: show the binding here")
+    p_bind.add_argument("name", nargs="?")
+    p_bind.add_argument("--subscription", metavar="GUID",
+                        help="pin this subscription for the worktree")
+    p_bind.set_defaults(func=cmd_bind)
+
+    p_unbind = sub.add_parser("unbind", help="remove this worktree's .cloudctx binding")
+    p_unbind.set_defaults(func=cmd_unbind)
 
     p_names = sub.add_parser("_names", help="(internal) bare context names, for completion")
     p_names.set_defaults(func=cmd_names)
