@@ -1281,11 +1281,12 @@ def cmd_install(args) -> int:
 TAG_RE = re.compile(r"refs/tags/v?(\d+)\.(\d+)\.(\d+)$")
 
 
-def _git(install_dir, *args, timeout=30):
+def _git(install_dir, *args, timeout=30, env=None):
     """Run git in the install dir; None on timeout/missing git (never raise)."""
     try:
         return subprocess.run(["git", "-C", str(install_dir), *args],
-                              capture_output=True, text=True, timeout=timeout)
+                              capture_output=True, text=True, timeout=timeout,
+                              env={**os.environ, **env} if env else None)
     except (subprocess.TimeoutExpired, OSError):
         return None
 
@@ -1305,6 +1306,51 @@ def _latest_remote_version(install_dir):
     return best
 
 
+def _upstream_state(install_dir):
+    """Compare HEAD with its upstream's tip on the remote (passive ls-remote).
+    Returns ("behind" | "diverged", local_sha, remote_sha), or None when not
+    behind, there is no upstream, or anything is unknowable."""
+    def out(*args, **kw):
+        r = _git(install_dir, *args, **kw)
+        return r.stdout.strip() if r is not None and r.returncode == 0 else None
+
+    branch = out("symbolic-ref", "-q", "--short", "HEAD")
+    if not branch:
+        return None
+    remote = out("config", f"branch.{branch}.remote")
+    merge = out("config", f"branch.{branch}.merge")
+    if not remote or not merge:
+        return None
+    listing = out("ls-remote", remote, merge, timeout=20)
+    if not listing:
+        return None
+    remote_sha = None
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == merge:
+            remote_sha = parts[0]
+            break
+    local_sha = out("rev-parse", "HEAD")
+    if not remote_sha or not local_sha or local_sha == remote_sha:
+        return None
+    no_lazy = {"GIT_NO_LAZY_FETCH": "1"}
+    e = _git(install_dir, "cat-file", "-e", f"{remote_sha}^{{commit}}",
+             env=no_lazy)
+    if e is None:
+        return None
+    if e.returncode != 0:
+        return ("behind", local_sha, remote_sha)
+    a = _git(install_dir, "merge-base", "--is-ancestor", remote_sha, "HEAD",
+             env=no_lazy)
+    if a is None or a.returncode == 0:
+        return None  # local is ahead (or unknowable)
+    c = _git(install_dir, "merge-base", "--is-ancestor", "HEAD", remote_sha,
+             env=no_lazy)
+    if c is None:
+        return None
+    return ("behind" if c.returncode == 0 else "diverged", local_sha, remote_sha)
+
+
 def cmd_self_update(args) -> int:
     install = script_dir()
     if not (install / ".git").exists():
@@ -1321,7 +1367,17 @@ def cmd_self_update(args) -> int:
             print(f"update available: {__version__} -> {latest_s} "
                   f"(run: cloudctx self-update)")
         else:
-            print(f"up to date: {__version__} (latest tag: v{latest_s})")
+            state = _upstream_state(install)
+            if state and state[0] == "behind":
+                print(f"update available: origin has newer commits than this "
+                      f"install ({state[1][:7]} -> {state[2][:7]}) "
+                      f"(run: cloudctx self-update)")
+            elif state:
+                print(f"origin has newer commits, but this clone also has "
+                      f"local commits; self-update cannot fast-forward it "
+                      f"({state[1][:7]} vs {state[2][:7]})")
+            else:
+                print(f"up to date: {__version__} (latest tag: v{latest_s})")
         return 0
 
     r = _git(install, "status", "--porcelain")

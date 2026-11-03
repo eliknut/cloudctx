@@ -1115,6 +1115,7 @@ class TestSelfUpdate(Base):
     def _git(self, cwd, *args):
         return subprocess.run(
             ["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t",
+             "-c", "commit.gpgsign=false",
              *args], capture_output=True, text=True, check=True)
 
     def _fixture(self):
@@ -1155,6 +1156,77 @@ class TestSelfUpdate(Base):
         code, out = self.run_cli("self-update", "--check")
         self.assertEqual(code, 0)
         self.assertIn("up to date", out)
+
+    def test_check_reports_untagged_upstream_commits(self):
+        remote, install = self._fixture()
+        self._git(remote, "tag", f"v{self.cc.__version__}")
+        (remote / "extra").write_text("x")
+        self._git(remote, "add", "-A")
+        self._git(remote, "commit", "-qm", "untagged")
+        code, out = self.run_cli("self-update", "--check")
+        self.assertEqual(code, 0)
+        self.assertIn("update available", out)
+        self.assertIn("origin has newer commits", out)
+
+    def test_check_up_to_date_when_local_ahead(self):
+        remote, install = self._fixture()
+        self._git(remote, "tag", f"v{self.cc.__version__}")
+        (install / "extra").write_text("x")
+        self._git(install, "add", "-A")
+        self._git(install, "commit", "-qm", "local only")
+        code, out = self.run_cli("self-update", "--check")
+        self.assertEqual(code, 0)
+        self.assertIn("up to date", out)
+
+    def _commit(self, repo, name):
+        (repo / name).write_text(name)
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-qm", name)
+
+    def test_check_diverged_cannot_fast_forward(self):
+        remote, install = self._fixture()
+        self._git(remote, "tag", f"v{self.cc.__version__}")
+        self._commit(remote, "remote-only")
+        self._commit(install, "local-only")
+        self._git(install, "fetch", "-q")
+        code, out = self.run_cli("self-update", "--check")
+        self.assertEqual(code, 0)
+        self.assertIn("cannot fast-forward", out)
+        self.assertNotIn("run: cloudctx self-update", out)
+
+    def test_check_no_upstream_is_up_to_date(self):
+        remote, install = self._fixture()
+        self._git(remote, "tag", f"v{self.cc.__version__}")
+        self._commit(remote, "remote-only")
+        self._git(install, "checkout", "-qb", "side")
+        code, out = self.run_cli("self-update", "--check")
+        self.assertEqual(code, 0)
+        self.assertIn("up to date", out)
+
+    def test_check_fetched_but_behind(self):
+        remote, install = self._fixture()
+        self._git(remote, "tag", f"v{self.cc.__version__}")
+        self._commit(remote, "remote-only")
+        self._git(install, "fetch", "-q")
+        code, out = self.run_cli("self-update", "--check")
+        self.assertEqual(code, 0)
+        self.assertIn("origin has newer commits than this install", out)
+
+    def test_check_upstream_on_other_remote(self):
+        remote, install = self._fixture()
+        self._git(remote, "tag", f"v{self.cc.__version__}")
+        fork = Path(tempfile.mkdtemp(prefix="cctx-fork-"))
+        self.addCleanup(shutil.rmtree, fork, ignore_errors=True)
+        subprocess.run(["git", "clone", "-q", str(remote), str(fork / "r")],
+                       check=True, capture_output=True)
+        fork = fork / "r"
+        self._commit(fork, "fork-only")
+        self._git(install, "remote", "add", "fork", str(fork))
+        self._git(install, "config", "branch.%s.remote" % self._git(
+            install, "symbolic-ref", "--short", "HEAD").stdout.strip(), "fork")
+        code, out = self.run_cli("self-update", "--check")
+        self.assertEqual(code, 0)
+        self.assertIn("origin has newer commits than this install", out)
 
     def test_update_pulls_and_reports_versions(self):
         remote, install = self._fixture()
