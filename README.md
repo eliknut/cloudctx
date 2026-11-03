@@ -90,7 +90,7 @@ cloudctx clear             # unset the vars + reset the window decoration
 cloudctx delete acme       # remove the registry entry AND ~/.cloudctx/acme
                            #   (asks first; --force to skip, --keep-store to keep files)
 cloudctx self-update       # git pull the install + regenerate iTerm2 profiles
-                           #   (--check only reports whether a newer tag exists)
+                           #   (--check reports a newer tag or untagged upstream commits)
 # interactive commands print a one-line stderr notice (TTY only, cached,
 # refreshed in the background at most daily) when a newer tag exists.
 # Opt out with CLOUDCTX_NO_UPDATE_CHECK=1.
